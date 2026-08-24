@@ -14,16 +14,17 @@ production/
 Nach dem Kopieren dieses Ordners wird der Spiegel mit genau einem Betriebsablauf gestartet:
 
 ```powershell
-pwsh -NoProfile -File .\Invoke-VisioSharePointMirror.ps1 `
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Invoke-VisioSharePointMirror.ps1 `
   -ConfigurationPath .\mirror.json
 ```
 
 Konfiguration, Voraussetzungen, Löschschutz und Aufgabenplanung sind in [`production/README.md`](production/README.md) beschrieben.
+Die ausgelieferte `production/mirror.json` enthält ausschließlich deutlich markierte Platzhalter und muss vor dem Einsatz vollständig ausgefüllt werden.
 
 ## Repository-Bereiche
 
 - `production/` ist das einzige aktuelle und auszuliefernde Betriebspaket.
-- `src/` enthält das frühere mehrstufige Pipeline-Gerüst zur Nachvollziehbarkeit und wird vom aktuellen Skript weder geladen noch benötigt.
+- `src/` enthält das frühere mehrstufige Pipeline-Gerüst einschließlich ausdrücklich markierter Legacy-Platzhalter zur Nachvollziehbarkeit und wird vom aktuellen Skript weder geladen noch benötigt.
 - `tests/` enthält die Tests des früheren Gerüsts und gehört nicht zum Betriebspaket.
 - `docs/` enthält das frühere Entscheidungsregister und Projektnotizen.
 - `config/` enthält Beispielkonfigurationen des früheren Gerüsts.

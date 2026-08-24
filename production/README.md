@@ -10,14 +10,16 @@ Das Skript besitzt nur einen Betriebsablauf: Es spiegelt alle Visio-Zeichnungen 
 
 ## Voraussetzungen
 
-- Windows PowerShell 5.1 oder PowerShell 7
+- Windows PowerShell 5.1
 - lokal installiertes und für das Ausführungskonto initialisiertes Microsoft Visio
 - Windows-Authentifizierung an der verwendeten SharePoint-Site
 - Lesezugriff auf den Quellordner sowie Anlage-, Überschreib- und Papierkorbrechte im SharePoint-Ziel
 - eine Dokumentbibliothek ohne erzwungenes Auschecken (`ForceCheckout=false`)
-- ein bereits vorhandener, ausschließlich für diesen Spiegel reservierter Zielordner
+- ein bereits vorhandener, ausschließlich für diesen Spiegel reservierter Zielordner; sein gesamter Inhalt darf bereinigt werden
 
 Bei einer geplanten Aufgabe müssen Visio-Profil, Netzlaufwerk und SharePoint-Rechte für genau das Aufgabenkonto eingerichtet sein. Eine Laufwerkszuordnung aus einer anderen Benutzersitzung ist dort normalerweise nicht sichtbar.
+
+> **ACHTUNG:** Der Zielordner ist dediziert und zur vollständigen Bereinigung freigegeben. Das Skript darf jede Datei und jeden Unterordner darin in den SharePoint-Papierkorb verschieben. Der konfigurierte Zielordner selbst bleibt bestehen.
 
 ## Konfiguration
 
@@ -34,16 +36,9 @@ Bei einer geplanten Aufgabe müssen Visio-Profil, Netzlaufwerk und SharePoint-Re
 
 Die Ziel-ID kann von der SharePoint-Administration per REST oder über die SharePoint-Verwaltungswerkzeuge ermittelt werden. Pfad und ID müssen zusammenpassen; andernfalls beendet sich das Skript ohne SharePoint-Änderung.
 
-Die mitgelieferte Konfiguration enthält absichtlich eine `.invalid`-URL und Beispielwerte. Sie muss vor dem ersten Lauf angepasst werden.
+Die mitgelieferte `mirror.json` ist absichtlich nicht lauffähig: Alle sechs Werte sind als `__PLATZHALTER_...__` markiert und müssen vor dem ersten Lauf ersetzt werden. Das Skript bricht mit einer eindeutigen Meldung ab, solange mindestens ein solcher Wert vorhanden ist. Im produktiven PowerShell-Code gibt es keine Platzhalterimplementierungen.
 
 ## Aufruf
-
-```powershell
-pwsh -NoProfile -File .\Invoke-VisioSharePointMirror.ps1 `
-  -ConfigurationPath .\mirror.json
-```
-
-Alternativ mit Windows PowerShell 5.1:
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass `
@@ -64,7 +59,7 @@ P:\Quelle\A\B\Datei.vsdx
 - Jede Visio-Datei wird bei jedem Lauf neu konvertiert und mit `overwrite=true` hochgeladen.
 - Erst nach vollständigem Scan, erfolgreicher Konvertierung aller Dateien, erfolgreichem Upload und erneuter Zielprüfung werden überzählige Inhalte recycelt.
 - Ist die Quelle leer, werden alle Inhalte unterhalb des Zielordners in den SharePoint-Papierkorb verschoben. Der Zielordner selbst bleibt bestehen.
-- Manuell abgelegte Fremdinhalte unterhalb des dedizierten Zielordners werden ebenfalls recycelt.
+- Manuell abgelegte Fremdinhalte unterhalb des dedizierten Zielordners werden ebenfalls recycelt. Dieser Ordner darf deshalb ausschließlich für den Spiegel verwendet werden.
 
 Nicht eindeutig adressierbare SharePoint-Namen, Pfade über 260 Zeichen, Reparse Points und PDF-Zielkollisionen brechen den Lauf vor Remote-Änderungen ab. Blockiert im Ziel eine Datei einen benötigten Ordner oder ein Ordner eine erwartete PDF, muss dieser Typkonflikt manuell beseitigt werden.
 

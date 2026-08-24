@@ -1,3 +1,66 @@
+<#
+.SYNOPSIS
+Spiegelt Visio-Dateien aus einem Windows-Quellordner als PDF nach SharePoint.
+
+.DESCRIPTION
+Dieses Skript besitzt genau einen Betriebsablauf: den vollstaendigen Spiegelabgleich.
+Es durchsucht SourcePath einschliesslich aller Unterordner nach .vsd, .vsdx und .vsdm,
+konvertiert jede gefundene Datei mit lokal installiertem Microsoft Visio in PDF und
+bildet den Pfad einschliesslich des Quellordnernamens unter TargetFolderPath ab.
+
+Beispiel der Pfadabbildung:
+P:\Quelle\A\B\Datei.vsdx
+  -> <TargetFolderPath>\Quelle\A\B\Datei.pdf
+
+Die JSON-Konfiguration enthaelt genau diese sechs Werte:
+- SourcePath: Absoluter lokaler Pfad, Netzlaufwerkspfad oder UNC-Quellpfad.
+- SharePointSiteUrl: HTTPS-URL der SharePoint-Site.
+- LibraryName: Anzeigename der SharePoint-Dokumentbibliothek.
+- TargetFolderPath: Relativer, bereits vorhandener Zielordner in der Bibliothek.
+- TargetFolderUniqueId: SharePoint-UniqueId dieses Zielordners als GUID.
+- LogPath: Absoluter Pfad der fortlaufenden Text-Logdatei.
+
+Sicherheits- und Bereinigungsverhalten:
+- Der Zielordner ist dediziert. Saemtliche Inhalte darunter duerfen durch den
+  Spiegel ersetzt oder in den SharePoint-Papierkorb verschoben werden.
+- Der konfigurierte Zielordner selbst wird niemals entfernt.
+- Pfad und TargetFolderUniqueId muessen zusammenpassen. Andernfalls erfolgen weder
+  Uploads noch Papierkorbaktionen.
+- Erst nach erfolgreicher Konvertierung aller Visio-Dateien wird SharePoint veraendert.
+- Erst nach erfolgreichen Uploads, erneuter Quellpruefung und Zielinventur werden
+  ueberzaehlige Dateien und Ordner recycelt.
+- Ist die Quelle leer, werden alle Inhalte unterhalb des Zielordners recycelt.
+- Die aktuelle Windows-Identitaet wird fuer Quelle und SharePoint verwendet;
+  Zugangsdaten werden weder abgefragt noch gespeichert.
+
+Bewusst nicht enthalten sind Preview-, Validate-, Simulate- oder DryRun-Modi,
+interne Selbsttests, ein inkrementeller Synchronisations-State und eine
+Aufgabenplanung. Geplante Laeufe werden ueber die Windows-Aufgabenplanung gestartet.
+
+Die ausgelieferte mirror.json ist eine Vorlage. Jeder Wert mit dem Muster
+__PLATZHALTER_...__ muss vor dem ersten Lauf ersetzt werden. Im produktiven
+PowerShell-Code selbst gibt es keine Platzhalterimplementierungen.
+
+.PARAMETER ConfigurationPath
+Pfad zur UTF-8-kodierten JSON-Konfiguration mit den oben beschriebenen sechs Werten.
+
+.EXAMPLE
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Invoke-VisioSharePointMirror.ps1 -ConfigurationPath .\mirror.json
+
+.NOTES
+Voraussetzungen: Windows PowerShell 5.1, Windows, lokal installiertes und fuer das
+Ausfuehrungskonto initialisiertes Microsoft Visio, Zugriff auf den vollstaendig
+lesbaren Quellbaum sowie Schreib- und Papierkorbrechte im dedizierten SharePoint-Ziel.
+Die Dokumentbibliothek darf kein erzwungenes Auschecken verlangen.
+
+Die TargetFolderUniqueId kann die SharePoint-Administration schreibgeschuetzt ueber
+<SharePointSiteUrl>/_api/web/GetFolderByServerRelativeUrl('<serverrelativer Zielpfad>')?$select=UniqueId
+ermitteln. Der dort gelieferte Wert muss zum konfigurierten Zielpfad gehoeren.
+#>
+
+#requires -Version 5.1
+#requires -PSEdition Desktop
+
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)]
@@ -8,8 +71,8 @@ param(
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 
-# Visio automation is most reliable in an STA process. PowerShell 7 normally
-# starts in MTA, so transparently restart the same mirror run in STA.
+# Visio-COM benoetigt einen STA-Thread. Windows PowerShell 5.1 startet normalerweise
+# bereits in STA; bei einem abweichenden Host wird derselbe Lauf einmalig in STA neu gestartet.
 if ([Threading.Thread]::CurrentThread.ApartmentState -ne [Threading.ApartmentState]::STA) {
     if ([string]::IsNullOrWhiteSpace($PSCommandPath)) {
         throw 'Das Spiegel-Skript muss aus einer Datei gestartet werden.'
@@ -19,6 +82,8 @@ if ([Threading.Thread]::CurrentThread.ApartmentState -ne [Threading.ApartmentSta
     exit $LASTEXITCODE
 }
 
+# Feste Betriebsvorgaben, keine Platzhalter: unterstuetzte Quellen, REST-Zeitlimit
+# und integrierte Windows-Authentifizierung fuer alle SharePoint-Aufrufe.
 $script:MirrorLogPath = $null
 $script:MirrorUtf8NoBom = New-Object System.Text.UTF8Encoding($false)
 $script:AllowedExtensions = @('.vsd', '.vsdx', '.vsdm')
@@ -27,6 +92,10 @@ $script:SharePointHeaders = @{
     Accept                         = 'application/json;odata=verbose'
     'X-FORMS_BASED_AUTH_ACCEPTED' = 'f'
 }
+
+# -----------------------------------------------------------------------------
+# Allgemeine Hilfsfunktionen und Konfiguration
+# -----------------------------------------------------------------------------
 
 function Write-MirrorLog {
     param(
@@ -136,6 +205,10 @@ function Read-MirrorConfiguration {
             [string]::IsNullOrWhiteSpace([string]$configuration.$name)) {
             throw "Der Konfigurationswert $name fehlt oder ist leer."
         }
+        # Die Vorlage bleibt absichtlich nicht lauffaehig, bis jeder markierte Wert ersetzt wurde.
+        if ([string]$configuration.$name -like '__PLATZHALTER_*__') {
+            throw "Der Konfigurationswert $name ist noch ein __PLATZHALTER_...__ und muss ersetzt werden."
+        }
     }
 
     $rawSourcePath = [string]$configuration.SourcePath
@@ -207,6 +280,10 @@ function Initialize-MirrorLog {
     $script:MirrorLogPath = $LiteralPath
 }
 
+# -----------------------------------------------------------------------------
+# Quellinventur und Ermittlung des erwarteten SharePoint-Zielbilds
+# -----------------------------------------------------------------------------
+
 function Get-SourceInventory {
     param([Parameter(Mandatory = $true)][string]$RootPath)
 
@@ -225,6 +302,9 @@ function Get-SourceInventory {
     $items = @()
     $targetOwners = @{}
 
+    # Der Stack bildet die Rekursion ohne feste Tiefengrenze ab. Jeder Ordner muss
+    # vollstaendig lesbar sein. Reparse Points (z. B. Junctions) brechen den Lauf ab,
+    # damit der Scan den freigegebenen Quellbaum nicht unbemerkt verlaesst.
     while ($pending.Count -gt 0) {
         $directory = $pending.Pop()
         try {
@@ -277,6 +357,8 @@ function Get-SourceInventory {
             if (-not (Test-SafeSharePointSegment -Segment $targetFileName)) {
                 throw 'Mindestens ein erzeugter PDF-Dateiname ist in SharePoint nicht zulaessig.'
             }
+            # Der Quellordnername ist absichtlich das erste Zielsegment. Nur fuer die
+            # Datei selbst wird die Visio-Endung durch .pdf ersetzt.
             $targetSegments = @($root.Name) + $sourceSegments
             $targetSegments[$targetSegments.Count - 1] = $targetFileName
             $targetRelativePath = $targetSegments -join '/'
@@ -344,6 +426,8 @@ function Test-SameSourceInventory {
         [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]]$Actual
     )
 
+    # Der Sicherheitsvergleich erkennt Aenderungen an Pfad, Dateigroesse oder Zeitstempel.
+    # Er ist kein inkrementeller State und entscheidet nicht, ob eine Datei hochgeladen wird.
     if ($Expected.Count -ne $Actual.Count) { return $false }
     for ($index = 0; $index -lt $Expected.Count; $index++) {
         if (-not [string]::Equals([string]$Expected[$index].SourceRelativePath, [string]$Actual[$index].SourceRelativePath, [StringComparison]::OrdinalIgnoreCase) -or
@@ -354,6 +438,10 @@ function Test-SameSourceInventory {
     }
     return $true
 }
+
+# -----------------------------------------------------------------------------
+# Lokale Visio-COM-Konvertierung
+# -----------------------------------------------------------------------------
 
 function Release-ComObject {
     param([AllowNull()][object]$InputObject)
@@ -400,7 +488,9 @@ function Convert-InventoryToPdf {
         $visio.ShowProgress = $false
         $documents = $visio.Documents
 
-        # Read-only, no MRU, hidden, macros disabled, no workspace and no refresh prompt.
+        # Visio-Konstanten als Zahlen, damit keine Office-Interop-Assembly benoetigt wird:
+        # schreibgeschuetzt, kein MRU-Eintrag, unsichtbar, Makros deaktiviert,
+        # kein Arbeitsbereich und keine Aufforderung zur Aktualisierung externer Daten.
         $openFlags = [int16](2 -bor 8 -bor 64 -bor 128 -bor 256 -bor 1024)
         for ($index = 0; $index -lt $Inventory.Count; $index++) {
             $item = $Inventory[$index]
@@ -424,6 +514,9 @@ function Convert-InventoryToPdf {
                         }
                     }
                 }
+                # ExportAsFixedFormat verwendet hier die Visio-Zahlenkonstanten:
+                # PDF, Druckqualitaet, alle Vordergrundseiten, keine Hintergrundseiten,
+                # Dokumenteigenschaften/Strukturtags einbeziehen und kein PDF/A.
                 [void]$document.ExportAsFixedFormat(
                     1, [IO.Path]::GetFullPath($pdfPath), 1, 0,
                     1, -1, $false, $false, $true, $true, $false
@@ -476,6 +569,13 @@ function Convert-InventoryToPdf {
     if ($quitFailure) { throw 'Die Visio-Instanz konnte nicht sauber beendet werden.' }
     return @($artifacts)
 }
+
+# -----------------------------------------------------------------------------
+# SharePoint-REST-Zugriffe mit der aktuellen Windows-Identitaet
+# -----------------------------------------------------------------------------
+
+# Jeder REST-Aufruf verwendet -UseDefaultCredentials. Es gibt deshalb absichtlich
+# keine Kennwort-, Token- oder Anmeldeinformationsfelder in Skript und Konfiguration.
 
 function Get-HttpStatusCode {
     param([Parameter(Mandatory = $true)][object]$ErrorRecord)
@@ -653,6 +753,9 @@ function Assert-SpTargetIdentity {
         [Parameter(Mandatory = $true)][guid]$ExpectedId
     )
 
+    # Diese Nur-Lese-Pruefung wird bewusst unmittelbar vor kritischen Schreib- und
+    # Papierkorbaktionen wiederholt. Ein verschobener, ersetzter oder falsch
+    # konfigurierter Zielordner stoppt den Lauf, bevor die naechste Aktion erfolgt.
     $folder = Get-SpFolderMetadata -SiteUrl $Context.SiteUrl -ServerRelativeUrl $Context.TargetRootUrl
     $actualId = [guid]::Empty
     if ($null -eq $folder -or
@@ -768,6 +871,10 @@ function Get-SpTargetInventory {
     return [pscustomobject][ordered]@{ Files = @($files); Folders = @($folders) }
 }
 
+# -----------------------------------------------------------------------------
+# Sicherheitspruefung der Zielinventur und exakter Spiegelabgleich
+# -----------------------------------------------------------------------------
+
 function Assert-SpRemoteInventory {
     param(
         [Parameter(Mandatory = $true)][object]$Context,
@@ -819,6 +926,10 @@ function Invoke-SpRecycleExtras {
     $expectedFolderKeys = @{}
     foreach ($folder in $ExpectedFolders) { $expectedFolderKeys[(Get-PathKey -Path $folder)] = $true }
 
+    # ACHTUNG: Auch manuell abgelegte Fremdinhalte gelten als ueberzaehlig. Bei leerer
+    # Quelle sind beide Erwartungslisten leer und alle Inhalte unterhalb des dedizierten
+    # Zielordners werden erfasst. Der Zielordner selbst ist nie Teil dieser Inventur
+    # und kann deshalb hier nicht recycelt werden.
     $extraFiles = @($RemoteInventory.Files | Where-Object { -not $expectedFiles.ContainsKey((Get-PathKey -Path ([string]$_.RelativePath))) } |
         Sort-Object @{ Expression = { @(([string]$_.RelativePath).Split([char]47)).Count }; Descending = $true }, RelativePath)
     foreach ($file in $extraFiles) {
@@ -843,6 +954,8 @@ function Invoke-SpRecycleExtras {
 function New-MirrorMutexName {
     param([Parameter(Mandatory = $true)][object]$Configuration)
 
+    # Gleiche SharePoint-Ziele erhalten denselben systemweiten Mutex. So koennen ein
+    # manueller und ein geplanter Lauf nicht gleichzeitig dasselbe Ziel veraendern.
     $identity = ('{0}|{1}|{2}|{3}' -f $Configuration.SharePointSiteUrl, $Configuration.LibraryName, $Configuration.TargetFolderPath, $Configuration.TargetFolderUniqueId).ToLowerInvariant()
     $sha = [Security.Cryptography.SHA256]::Create()
     try { $hash = $sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($identity)) }
@@ -857,40 +970,53 @@ $mutexAcquired = $false
 $runPath = $null
 $exitCode = 1
 
+# -----------------------------------------------------------------------------
+# Einziger Betriebsablauf: vollstaendiger Spiegelabgleich
+# -----------------------------------------------------------------------------
+
 try {
+    # 1. Konfiguration lesen, Platzhalter ausschliessen und fortlaufendes Log starten.
     $configuration = Read-MirrorConfiguration -LiteralPath $ConfigurationPath
     Initialize-MirrorLog -LiteralPath $configuration.LogPath
     Write-MirrorLog -Level INFO -Message 'Spiegel-Lauf gestartet.'
 
+    # 2. Exklusiven Lauf fuer genau dieses SharePoint-Ziel sichern.
     $mutex = New-Object Threading.Mutex($false, (New-MirrorMutexName -Configuration $configuration))
     try { $mutexAcquired = $mutex.WaitOne(0, $false) }
     catch [Threading.AbandonedMutexException] { $mutexAcquired = $true }
     if (-not $mutexAcquired) { throw 'Fuer dieses SharePoint-Ziel laeuft bereits ein Spiegel-Lauf.' }
 
+    # 3. Quelle vollstaendig lesen und das erwartete Zielbild vorab validieren.
     $sourceInventory = @(Get-SourceInventory -RootPath $configuration.SourcePath)
     $expectedFolders = @(Get-ExpectedFolders -Inventory $sourceInventory)
     Assert-NoFileFolderCollisions -Inventory $sourceInventory -ExpectedFolders $expectedFolders
     Write-MirrorLog -Level INFO -Message ("{0} Visio-Datei(en) gefunden." -f $sourceInventory.Count)
 
+    # 4. SharePoint-Anmeldung, Bibliothek, Zielpfad und unveraenderliche Ziel-GUID pruefen.
     $spContext = Get-SpContext -Configuration $configuration
     Assert-SharePointPathLengths -Context $spContext -Inventory $sourceInventory -ExpectedFolders $expectedFolders
     Write-MirrorLog -Level INFO -Message 'SharePoint-Ziel und Windows-Anmeldung wurden bestaetigt.'
 
+    # 5. Alle Quellen lokal zwischenspeichern und mit einer Visio-Instanz konvertieren.
+    # Bis zum Abschluss dieser Phase erfolgen keine SharePoint-Schreibzugriffe.
     $runPath = Join-Path ([IO.Path]::GetTempPath()) ('PPSI-VisioSharePointMirror-' + [guid]::NewGuid().ToString('N'))
     [void][IO.Directory]::CreateDirectory($runPath)
     $artifacts = @(Convert-InventoryToPdf -Inventory $sourceInventory -RunPath $runPath)
     Write-MirrorLog -Level INFO -Message ("{0} PDF-Datei(en) erzeugt." -f $artifacts.Count)
 
+    # 6. Eine waehrend der Konvertierung geaenderte Quelle verhindert jeden Upload.
     $inventoryBeforeWrite = @(Get-SourceInventory -RootPath $configuration.SourcePath)
     if (-not (Test-SameSourceInventory -Expected $sourceInventory -Actual $inventoryBeforeWrite)) {
         throw 'Die Quelle hat sich waehrend der Konvertierung geaendert; SharePoint blieb unveraendert.'
     }
 
+    # 7. Benoetigte Ordner anlegen und alle PDFs mit overwrite=true hochladen.
     Assert-SpTargetIdentity -Context $spContext -ExpectedId $configuration.TargetFolderUniqueId
     Ensure-SpFolders -Context $spContext -RelativeFolders $expectedFolders
     Send-SpPdfs -Context $spContext -Artifacts $artifacts
     Write-MirrorLog -Level INFO -Message ("{0} PDF-Datei(en) nach SharePoint hochgeladen." -f $artifacts.Count)
 
+    # 8. Nur nach vollstaendig erfolgreichem Upload die exakte Zielbereinigung starten.
     $inventoryBeforeRecycle = @(Get-SourceInventory -RootPath $configuration.SourcePath)
     if (-not (Test-SameSourceInventory -Expected $sourceInventory -Actual $inventoryBeforeRecycle)) {
         throw 'Die Quelle hat sich waehrend des Uploads geaendert; Papierkorbaktionen wurden unterdrueckt.'
@@ -916,6 +1042,7 @@ catch {
     $exitCode = 1
 }
 finally {
+    # Temporaere Dateien und Mutex werden bei Erfolg und bei jedem Fehler freigegeben.
     if (-not [string]::IsNullOrWhiteSpace($runPath) -and [IO.Directory]::Exists($runPath)) {
         try { [IO.Directory]::Delete($runPath, $true) }
         catch {

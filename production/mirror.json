@@ -1,8 +1,8 @@
 {
-  "SourcePath": "P:\\Quelle",
-  "SharePointSiteUrl": "https://sharepoint.example.invalid/sites/ppsi",
-  "LibraryName": "Dokumente",
-  "TargetFolderPath": "Visio-PDF-Spiegel",
-  "TargetFolderUniqueId": "00000000-0000-0000-0000-000000000001",
-  "LogPath": "C:\\Logs\\VisioSharePointMirror.log"
+  "SourcePath": "__PLATZHALTER_QUELLPFAD__",
+  "SharePointSiteUrl": "__PLATZHALTER_SHAREPOINT_SITE_URL__",
+  "LibraryName": "__PLATZHALTER_BIBLIOTHEKSNAME__",
+  "TargetFolderPath": "__PLATZHALTER_DEDIZIERTER_ZIELORDNER__",
+  "TargetFolderUniqueId": "__PLATZHALTER_ZIELORDNER_UNIQUE_ID__",
+  "LogPath": "__PLATZHALTER_LOGPFAD__"
 }
