@@ -1,0 +1,58 @@
+{
+  "SchemaVersion": "2.0",
+  "ResolvedDecisionIds": [
+    "ENV-001", "ENV-002", "ENV-003", "SRC-001", "SRC-002",
+    "CNV-001", "CNV-002", "SP-001", "SP-002", "SEC-001",
+    "SEC-002", "SYN-001", "SYN-002", "SYN-003", "SYN-005",
+    "OPS-001", "ACC-001", "ACC-003"
+  ],
+  "Source": {
+    "RootPath": "Z:\\Drawings",
+    "FileNamePattern": "[",
+    "Extensions": [
+      ".docx"
+    ],
+    "RegexTimeoutMilliseconds": 10
+  },
+  "Conversion": {
+    "Provider": "VisioCom",
+    "OutputFormat": "XPS",
+    "PageRange": "AllForegroundPages",
+    "Intent": "Print",
+    "DisableMacros": true,
+    "RefreshExternalData": false
+  },
+  "SharePoint": {
+    "Platform": "SharePointServer",
+    "ApiKind": "MicrosoftGraphV1",
+    "AuthenticationKind": "CertificateAppOnly",
+    "CertificateStoreLocation": "LocalMachine",
+    "WorkloadIdentityFilePath": null,
+    "TenantId": "not-a-guid",
+    "ClientId": "also-not-a-guid",
+    "CertificateThumbprint": "TOO-SHORT",
+    "SiteId": "dummy-site",
+    "DriveId": "dummy-drive",
+    "TargetFolderId": "dummy-folder",
+    "SiteUrl": null,
+    "LibraryName": null,
+    "TargetFolderPath": null
+  },
+  "Sync": {
+    "Direction": "PublishOnly",
+    "ConflictPolicy": "SourceWins",
+    "RenamePolicy": "CreateNew",
+    "DeletePolicy": "DeleteAfterGrace",
+    "FingerprintMode": "MetadataThenSha256"
+  },
+  "Operations": {
+    "StatePath": "C:\\Temp\\state.json",
+    "StagingPath": "C:\\Temp\\staging",
+    "LogPath": "C:\\Temp\\logs",
+    "IntervalMinutes": 0,
+    "StabilityProbeSeconds": 10,
+    "ConversionTimeoutSeconds": 300,
+    "MaxRetryCount": 3,
+    "SingleHostOnly": true
+  }
+}

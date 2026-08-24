@@ -1,0 +1,26 @@
+# Lokale Laufzeitdaten
+logs/
+state/
+staging/
+cache/
+*.log
+*.tmp
+*.bak
+
+# Lokale, gegebenenfalls umgebungsspezifische Konfiguration
+config/sync.local.json
+config/runtime.local.json
+config/*.secrets.json
+.env
+.env.*
+
+# Generierungs- und Prüfartefakte
+.build/
+outputs/
+node_modules/
+
+# Betriebssystem und Editoren
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

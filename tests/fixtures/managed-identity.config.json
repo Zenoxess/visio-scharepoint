@@ -1,0 +1,56 @@
+{
+  "SchemaVersion": "1.0",
+  "ResolvedDecisionIds": [
+    "ENV-001", "ENV-002", "ENV-003", "SRC-001", "SRC-002",
+    "CNV-001", "CNV-002", "SP-001", "SP-002", "SEC-001",
+    "SEC-002", "SYN-001", "SYN-002", "SYN-003", "SYN-005",
+    "OPS-001", "ACC-001", "ACC-003"
+  ],
+  "Source": {
+    "RootPath": "\\\\fileserver.example.invalid\\drawings",
+    "FileNamePattern": "^PPSI-.*\\.vsdx$",
+    "Extensions": [".vsdx"],
+    "RegexTimeoutMilliseconds": 500
+  },
+  "Conversion": {
+    "Provider": "ExternalConverter",
+    "OutputFormat": "PDF",
+    "PageRange": "AllForegroundPages",
+    "Intent": "Print",
+    "DisableMacros": true,
+    "RefreshExternalData": false
+  },
+  "SharePoint": {
+    "Platform": "SharePointOnline",
+    "ApiKind": "MicrosoftGraphV1",
+    "AuthenticationKind": "ManagedIdentity",
+    "CertificateStoreLocation": null,
+    "WorkloadIdentityFilePath": null,
+    "TenantId": null,
+    "ClientId": null,
+    "CertificateThumbprint": null,
+    "SiteId": "example.sharepoint.com,33333333-3333-4333-8333-333333333333,44444444-4444-4444-8444-444444444444",
+    "DriveId": "b!dummy-managed-drive-id",
+    "TargetFolderId": "01DUMMYMANAGEDFOLDERID",
+    "SiteUrl": null,
+    "LibraryName": null,
+    "TargetFolderPath": null
+  },
+  "Sync": {
+    "Direction": "PublishOnly",
+    "ConflictPolicy": "SourceWins",
+    "RenamePolicy": "CreateNew",
+    "DeletePolicy": "Never",
+    "FingerprintMode": "MetadataThenSha256"
+  },
+  "Operations": {
+    "StatePath": "C:\\ProgramData\\VisioSharePointSync\\managed-state.json",
+    "StagingPath": "C:\\ProgramData\\VisioSharePointSync\\managed-staging",
+    "LogPath": "C:\\ProgramData\\VisioSharePointSync\\managed-logs",
+    "IntervalMinutes": 15,
+    "StabilityProbeSeconds": 10,
+    "ConversionTimeoutSeconds": 300,
+    "MaxRetryCount": 3,
+    "SingleHostOnly": true
+  }
+}

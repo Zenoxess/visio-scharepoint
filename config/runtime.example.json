@@ -1,0 +1,28 @@
+{
+  "SchemaVersion": "1.0",
+  "Execution": {
+    "Enabled": false
+  },
+  "Source": {
+    "Recurse": true,
+    "ExcludeHidden": true,
+    "ExcludeSystem": true,
+    "ExcludeReparsePoints": true,
+    "ExcludePatterns": [
+      "~$*",
+      "*.tmp"
+    ]
+  },
+  "Conversion": {
+    "AdapterKind": "__PLACEHOLDER_REQUIRED__",
+    "AdapterVersion": "__PLACEHOLDER_REQUIRED__",
+    "ExternalExecutablePath": null
+  },
+  "Upload": {
+    "SessionThresholdBytes": 10485760,
+    "ChunkSizeBytes": 10485760
+  },
+  "Operations": {
+    "QuarantinePath": "__PLACEHOLDER_REQUIRED__"
+  }
+}

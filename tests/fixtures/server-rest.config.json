@@ -1,0 +1,56 @@
+{
+  "SchemaVersion": "1.0",
+  "ResolvedDecisionIds": [
+    "ENV-001", "ENV-002", "ENV-003", "SRC-001", "SRC-002",
+    "CNV-001", "CNV-002", "SP-001", "SP-002", "SEC-001",
+    "SEC-002", "SYN-001", "SYN-002", "SYN-003", "SYN-005",
+    "OPS-001", "ACC-001", "ACC-003"
+  ],
+  "Source": {
+    "RootPath": "\\\\fileserver.example.invalid\\drawings",
+    "FileNamePattern": "^PPSI-.*\\.vsdx$",
+    "Extensions": [".vsdx"],
+    "RegexTimeoutMilliseconds": 500
+  },
+  "Conversion": {
+    "Provider": "VisioCom",
+    "OutputFormat": "PDF",
+    "PageRange": "AllForegroundPages",
+    "Intent": "Print",
+    "DisableMacros": true,
+    "RefreshExternalData": false
+  },
+  "SharePoint": {
+    "Platform": "SharePointServer",
+    "ApiKind": "SharePointRest",
+    "AuthenticationKind": "WindowsIntegrated",
+    "CertificateStoreLocation": null,
+    "WorkloadIdentityFilePath": null,
+    "TenantId": null,
+    "ClientId": null,
+    "CertificateThumbprint": null,
+    "SiteId": null,
+    "DriveId": null,
+    "TargetFolderId": null,
+    "SiteUrl": "https://sharepoint.example.invalid/sites/engineering",
+    "LibraryName": "Documents",
+    "TargetFolderPath": "Published/Visio"
+  },
+  "Sync": {
+    "Direction": "PublishOnly",
+    "ConflictPolicy": "SourceWins",
+    "RenamePolicy": "CreateNew",
+    "DeletePolicy": "Never",
+    "FingerprintMode": "MetadataThenSha256"
+  },
+  "Operations": {
+    "StatePath": "C:\\ProgramData\\VisioSharePointSync\\server-state.json",
+    "StagingPath": "C:\\ProgramData\\VisioSharePointSync\\server-staging",
+    "LogPath": "C:\\ProgramData\\VisioSharePointSync\\server-logs",
+    "IntervalMinutes": 15,
+    "StabilityProbeSeconds": 10,
+    "ConversionTimeoutSeconds": 300,
+    "MaxRetryCount": 3,
+    "SingleHostOnly": true
+  }
+}

@@ -1,0 +1,51 @@
+{
+  "SchemaVersion": "1.0",
+  "ResolvedDecisionIds": [],
+  "Source": {
+    "RootPath": "Undecided",
+    "FileNamePattern": "Undecided",
+    "Extensions": [],
+    "RegexTimeoutMilliseconds": null
+  },
+  "Conversion": {
+    "Provider": "Undecided",
+    "OutputFormat": "PDF",
+    "PageRange": null,
+    "Intent": null,
+    "DisableMacros": null,
+    "RefreshExternalData": null
+  },
+  "SharePoint": {
+    "Platform": "Undecided",
+    "ApiKind": "Undecided",
+    "AuthenticationKind": "Undecided",
+    "CertificateStoreLocation": null,
+    "WorkloadIdentityFilePath": null,
+    "TenantId": null,
+    "ClientId": null,
+    "CertificateThumbprint": null,
+    "SiteId": null,
+    "DriveId": null,
+    "TargetFolderId": null,
+    "SiteUrl": null,
+    "LibraryName": null,
+    "TargetFolderPath": null
+  },
+  "Sync": {
+    "Direction": "Undecided",
+    "ConflictPolicy": "Undecided",
+    "RenamePolicy": "Undecided",
+    "DeletePolicy": "Undecided",
+    "FingerprintMode": "Undecided"
+  },
+  "Operations": {
+    "StatePath": null,
+    "StagingPath": null,
+    "LogPath": null,
+    "IntervalMinutes": null,
+    "StabilityProbeSeconds": null,
+    "ConversionTimeoutSeconds": null,
+    "MaxRetryCount": null,
+    "SingleHostOnly": null
+  }
+}
