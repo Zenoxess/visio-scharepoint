@@ -1,0 +1,8 @@
+{
+  "SourcePath": "P:\\Quelle",
+  "SharePointSiteUrl": "https://sharepoint.example.invalid/sites/ppsi",
+  "LibraryName": "Dokumente",
+  "TargetFolderPath": "Visio-PDF-Spiegel",
+  "TargetFolderUniqueId": "00000000-0000-0000-0000-000000000001",
+  "LogPath": "C:\\Logs\\VisioSharePointMirror.log"
+}

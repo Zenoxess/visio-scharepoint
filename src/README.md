@@ -1,14 +1,14 @@
 # Zuordnung der PowerShell-Skripte
 
-## `production`
+## `production` – früheres Pipeline-Gerüst
 
-Dieser Ordner ist das vollständige spätere Betriebspaket und muss als Einheit kopiert werden:
+Dieser Ordner bleibt ausschließlich zur Nachvollziehbarkeit des früheren mehrstufigen Pipeline-Gerüsts erhalten. Er ist nicht mehr das aktuelle Betriebspaket und wird vom neuen Spiegel-Skript nicht geladen:
 
-- `Invoke-VisioSharePointSync.Production.ps1` ist der einzige produktive Einstieg und führt intern ausschließlich `Execute` aus.
+- `Invoke-VisioSharePointSync.Production.ps1` war der produktive Einstieg dieses früheren Gerüsts und führt intern ausschließlich `Execute` aus.
 - `VisioSharePointSync.Core.ps1` validiert die fachliche Sync-Konfiguration.
 - `VisioSharePointSync.Pipeline.Runtime.ps1` enthält Orchestrierung, Sicherheitsgates, State-, Datei- und Transportlogik.
 
-Keine Datei in diesem Ordner lädt Test-Fixtures oder die Simulationsadapter.
+Das aktuelle, eigenständige Betriebspaket liegt im Top-Level-Ordner `production/` des Repositories und besteht nur aus Skript, Konfiguration und Kurzanleitung.
 
 ## `development`
 
