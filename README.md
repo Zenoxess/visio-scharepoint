@@ -10,6 +10,9 @@ Dieses Repository enthält den ersten, bewusst sicheren Projektmeilenstein für 
 - `config/runtime.example.json` beschreibt getrennt davon sichere Laufzeitvorgaben und ist standardmäßig nicht zur Ausführung freigegeben.
 - `src/Invoke-VisioSharePointSync.ps1` validiert eine Konfiguration oder zeigt im Dry-Run ausschließlich die später vorgesehenen Phasen.
 - `src/Invoke-VisioSharePointSync.Pipeline.ps1` ist ein separater Einstieg für die abgesicherte Pipeline-Vorbereitung mit `Validate`, `Simulate` und `Execute`.
+- `src/Invoke-VisioSharePointSync.Production.ps1` ist der eigenständige Einstieg für den späteren Produktivbetrieb. Er besitzt keinen Modus-Schalter und startet ausschließlich den abgesicherten `Execute`-Pfad.
+- `src/VisioSharePointSync.Pipeline.Runtime.ps1` enthält die gemeinsame Validierungs-, Sicherheits- und Ablauflogik ohne Fake-Adapter.
+- `src/VisioSharePointSync.Pipeline.Simulation.ps1` enthält ausschließlich die In-Memory-Adapter und wird nur vom Pipeline-Einstieg geladen, niemals vom Produktiv-Einstieg.
 - `tests/Test-Scaffold.ps1` prüft das Gerüst ohne externe Testmodule.
 - `tests/Test-PipelineScaffold.ps1` prüft die Pipeline-Grenzen und insbesondere, dass keine unbeabsichtigten externen Zugriffe stattfinden.
 
@@ -93,6 +96,19 @@ Exitcodes des separaten Pipeline-Einstiegs:
 - `3`: Die Ausführung wurde sicher blockiert oder die gewählte Route ist nicht bereit.
 - `4`: Ein erwarteter operativer Fehler oder Teilerfolg ist in einem später freigegebenen Lauf aufgetreten.
 
+## Eigener Produktiv-Einstieg
+
+Für den späteren unbeaufsichtigten Betrieb gibt es einen bewusst kleinen, separaten Einstieg ohne `Validate`-, `DryRun`- oder `Simulate`-Auswahl. Er lädt nur den Konfigurations-Core und die gemeinsame Runtime, nicht die getrennte Simulationsdatei. Den Modus setzt er intern fest auf `Execute`; dadurch bleibt die produktive Bedienoberfläche testfrei, ohne eine zweite, abweichende Kopie der Ablauf- und Sicherheitslogik zu erzeugen.
+
+```powershell
+pwsh -NoProfile -File .\src\Invoke-VisioSharePointSync.Production.ps1 `
+  -ConfigurationPath .\config\sync.local.json `
+  -RuntimeConfigurationPath .\config\runtime.local.json `
+  -AllowExternalSideEffects
+```
+
+Die doppelte Freigabe bleibt erhalten: `-AllowExternalSideEffects` und `Runtime.Execution.Enabled: true` müssen gleichzeitig gesetzt sein. Danach müssen weiterhin sämtliche benötigten Adapterfähigkeiten und die Go-live-Freigabe den Status `Ready` besitzen. Bis die weiter unten genannten Integrationsplatzhalter implementiert und fachlich freigegeben sind, endet auch dieser Einstieg sicher mit Exitcode `3`, bevor UNC-, COM- oder SharePoint-Zugriffe stattfinden. Konfigurationen unter `tests/fixtures` sind ausschließlich Testdaten und dürfen für diesen Aufruf nicht verwendet werden.
+
 ## Konfiguration
 
 Das Schema besteht aus `Source`, `Conversion`, `SharePoint`, `Sync` und `Operations`. Werte wie `Undecided`, `null` und leere Listen bleiben sichtbar, bis die verknüpfte Frage im Entscheidungsregister beantwortet wurde. `ResolvedDecisionIds` bestätigt zusätzlich die 18 als Blocker markierten Entscheidungen. Diese Liste ersetzt nicht die Dokumentation in Excel: Ohne jede Blocker-ID ist Exitcode `0` ausgeschlossen; unbekannte oder doppelte IDs werden abgewiesen.
@@ -138,7 +154,7 @@ pwsh -NoProfile -File .\tests\Test-PipelineScaffold.ps1
 powershell.exe -NoProfile -File .\tests\Test-PipelineScaffold.ps1
 ```
 
-Die Testläufe nutzen nur PowerShell-Bordmittel. `Test-Scaffold.ps1` prüft unter anderem vollständige, unvollständige und unzulässige Konfigurationen, das exakte 18-Blocker-Gate, BOM-loses UTF-8 mit Umlauten, konditionale Graph-/REST- und Authentifizierungsvarianten, geschlossene und redigierte Schlüsselvalidierung einschließlich doppelter JSON-Schlüssel, Graph-ID- und Pfadsyntax, den Regex-Timeout, stabile Exitcodes sowie die garantierte Nebenwirkungsfreiheit des Dry-Runs. `Test-PipelineScaffold.ps1` prüft zusätzlich die Runtime-Konfiguration, Modusgrenzen, Execute-Sperren, die vollständige Fake-Adapter-Stagefolge, Commit-vor-State, unveränderte Dateien, Teilerfolg, Inventur-/State-Blockaden, Zielkollisionen, Remote-ID-/Provenienz-/eTag-Sicherheit, Retry mit Fake-Uhr, atomaren State-Replace und die Log-Positivliste.
+Die Testläufe nutzen nur PowerShell-Bordmittel. `Test-Scaffold.ps1` prüft unter anderem vollständige, unvollständige und unzulässige Konfigurationen, das exakte 18-Blocker-Gate, BOM-loses UTF-8 mit Umlauten, konditionale Graph-/REST- und Authentifizierungsvarianten, geschlossene und redigierte Schlüsselvalidierung einschließlich doppelter JSON-Schlüssel, Graph-ID- und Pfadsyntax, den Regex-Timeout, stabile Exitcodes sowie die garantierte Nebenwirkungsfreiheit des Dry-Runs. `Test-PipelineScaffold.ps1` prüft zusätzlich die Runtime-Konfiguration, die physische Trennung des Produktiv-Einstiegs von den Simulationsadaptern, vollständige Bootstrap-Ergebnisse, Modusgrenzen, Execute-Sperren, die vollständige Fake-Adapter-Stagefolge, Commit-vor-State, unveränderte Dateien, Teilerfolg, Inventur-/State-Blockaden, Zielkollisionen, Remote-ID-/Provenienz-/eTag-Sicherheit, Retry mit Fake-Uhr, atomaren State-Replace und die Log-Positivliste.
 
 ## Technische Referenzen
 
