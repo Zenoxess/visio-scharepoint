@@ -5,12 +5,16 @@ Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 
 $projectRoot = Split-Path -Path $PSScriptRoot -Parent
-$pipelinePath = Join-Path $projectRoot 'src\Invoke-VisioSharePointSync.Pipeline.ps1'
-$pipelineRuntimePath = Join-Path $projectRoot 'src\VisioSharePointSync.Pipeline.Runtime.ps1'
-$pipelineSimulationPath = Join-Path $projectRoot 'src\VisioSharePointSync.Pipeline.Simulation.ps1'
-$productionPath = Join-Path $projectRoot 'src\Invoke-VisioSharePointSync.Production.ps1'
-$corePath = Join-Path $projectRoot 'src\VisioSharePointSync.Core.ps1'
-$legacyTestPath = Join-Path $PSScriptRoot 'Test-Scaffold.ps1'
+$srcRootPath = Join-Path $projectRoot 'src'
+$productionRootPath = Join-Path $srcRootPath 'production'
+$developmentRootPath = Join-Path $srcRootPath 'development'
+$legacyRootPath = Join-Path $srcRootPath 'legacy'
+$pipelinePath = Join-Path $projectRoot 'src\development\Invoke-VisioSharePointSync.Development.ps1'
+$pipelineRuntimePath = Join-Path $projectRoot 'src\production\VisioSharePointSync.Pipeline.Runtime.ps1'
+$pipelineSimulationPath = Join-Path $projectRoot 'src\development\VisioSharePointSync.Pipeline.Simulation.ps1'
+$productionPath = Join-Path $projectRoot 'src\production\Invoke-VisioSharePointSync.Production.ps1'
+$corePath = Join-Path $projectRoot 'src\production\VisioSharePointSync.Core.ps1'
+$legacyTestPath = Join-Path $PSScriptRoot 'Test-LegacyScaffold.ps1'
 $graphFixturePath = Join-Path $PSScriptRoot 'fixtures\complete.config.json'
 $restFixturePath = Join-Path $PSScriptRoot 'fixtures\server-rest.config.json'
 $incompleteFixturePath = Join-Path $projectRoot 'config\sync.example.json'
@@ -113,8 +117,7 @@ function Invoke-VssPipelineCli {
         [string]$ConfigurationPath,
         [string]$RuntimeConfigurationPath,
         [string]$EntryPointPath = $pipelinePath,
-        [ValidateSet('Validate', 'Simulate', 'Execute')][string]$Mode = 'Validate',
-        [switch]$AllowExternalSideEffects
+        [ValidateSet('Validate', 'Simulate')][string]$Mode = 'Validate'
     )
     $hostExecutable = (Get-Process -Id $PID).Path
     $argumentList = @(
@@ -124,7 +127,6 @@ function Invoke-VssPipelineCli {
         '-RuntimeConfigurationPath', $RuntimeConfigurationPath,
         '-Mode', $Mode
     )
-    if ($AllowExternalSideEffects) { $argumentList += '-AllowExternalSideEffects' }
     $captured = @(& $hostExecutable @argumentList 2>&1)
     $exitCode = $LASTEXITCODE
     $lines = @($captured | ForEach-Object { [string]$_ })
@@ -287,6 +289,49 @@ try {
     Write-VssJsonFile $runtimeDisabled $runtimeDisabledPath
     Write-VssJsonFile $runtimeEnabled $runtimeEnabledPath
 
+    Invoke-VssTest -Name 'Production, Development und Legacy besitzen eindeutige Dateigrenzen' -Body {
+        Assert-VssEqual 0 @(Get-ChildItem -LiteralPath $srcRootPath -File -Filter '*.ps1').Count 'Im src-Wurzelordner liegen noch nicht zugeordnete PowerShell-Skripte.'
+
+        $productionFiles = @(
+            Get-ChildItem -LiteralPath $productionRootPath -File -Filter '*.ps1' |
+                Sort-Object Name |
+                ForEach-Object Name
+        )
+        Assert-VssEqual 'Invoke-VisioSharePointSync.Production.ps1|VisioSharePointSync.Core.ps1|VisioSharePointSync.Pipeline.Runtime.ps1' ($productionFiles -join '|') 'Production-Bundle enthaelt unerwartete oder fehlende Skripte.'
+
+        $developmentFiles = @(
+            Get-ChildItem -LiteralPath $developmentRootPath -File -Filter '*.ps1' |
+                Sort-Object Name |
+                ForEach-Object Name
+        )
+        Assert-VssEqual 'Invoke-VisioSharePointSync.Development.ps1|VisioSharePointSync.Pipeline.Simulation.ps1' ($developmentFiles -join '|') 'Development-Ordner enthaelt unerwartete oder fehlende Skripte.'
+
+        $legacyFiles = @(
+            Get-ChildItem -LiteralPath $legacyRootPath -File -Filter '*.ps1' |
+                Sort-Object Name |
+                ForEach-Object Name
+        )
+        Assert-VssEqual 'Invoke-VisioSharePointSync.Legacy.ps1|VisioSharePointSync.AdapterStubs.Legacy.ps1' ($legacyFiles -join '|') 'Legacy-Ordner enthaelt unerwartete oder fehlende Skripte.'
+
+        $developmentTokens = $null
+        $developmentParseErrors = $null
+        $developmentAst = [System.Management.Automation.Language.Parser]::ParseFile(
+            $pipelinePath,
+            [ref]$developmentTokens,
+            [ref]$developmentParseErrors
+        )
+        Assert-VssEqual 0 @($developmentParseErrors).Count 'Development-CLI besitzt Parserfehler.'
+        $developmentParameterNames = @(
+            $developmentAst.ParamBlock.Parameters |
+                ForEach-Object { $_.Name.VariablePath.UserPath }
+        )
+        Assert-VssEqual 'ConfigurationPath|RuntimeConfigurationPath|Mode' ($developmentParameterNames -join '|') 'Development-CLI besitzt einen produktiven Freigabeparameter.'
+        $modeParameter = @($developmentAst.ParamBlock.Parameters | Where-Object { $_.Name.VariablePath.UserPath -eq 'Mode' })[0]
+        $modeValidateSet = @($modeParameter.Attributes | Where-Object { $_.TypeName.FullName -eq 'ValidateSet' })[0]
+        $modeValues = @($modeValidateSet.PositionalArguments | ForEach-Object { $_.Value })
+        Assert-VssEqual 'Validate|Simulate' ($modeValues -join '|') 'Development-CLI erlaubt einen anderen Modus als Validate oder Simulate.'
+    }
+
     Invoke-VssTest -Name 'Pipelinequelle, Stufen und Platzhalter bleiben statisch auffindbar' -Body {
         Assert-VssTrue ([System.IO.File]::Exists($pipelinePath)) 'Pipeline-CLI fehlt.'
         Assert-VssTrue ([System.IO.File]::Exists($pipelineRuntimePath)) 'Gemeinsame Pipeline-Runtime fehlt.'
@@ -366,7 +411,7 @@ try {
             Assert-VssTrue (-not $productionSource.Contains($forbiddenText)) "Produktiv-CLI enthaelt Simulations- oder Testbezug: $forbiddenText"
         }
         Assert-VssTrue $productionSource.Contains('VisioSharePointSync.Pipeline.Runtime.ps1') 'Produktiv-CLI laedt die gemeinsame Runtime nicht.'
-        Assert-VssTrue (-not $productionSource.Contains('Invoke-VisioSharePointSync.Pipeline.ps1')) 'Produktiv-CLI delegiert noch an den gemischten Pipeline-Einstieg.'
+        Assert-VssTrue (-not $productionSource.Contains('Invoke-VisioSharePointSync.Development.ps1')) 'Produktiv-CLI delegiert noch an den Development-Einstieg.'
 
         $before = @(Get-VssDirectorySnapshot $sandbox) -join [Environment]::NewLine
         $result = Invoke-VssProductionCli -ConfigurationPath $graphConfigurationPath -RuntimeConfigurationPath $runtimeDisabledPath
@@ -382,13 +427,23 @@ try {
         Assert-VssEqual $beforeApprovedAttempt $afterApprovedAttempt 'Readiness-blockierter Produktivaufruf hat Dateien oder Verzeichnisse veraendert.'
         Assert-VssObservableResultContract -Output $approvedAttempt.Output -ExpectedMode Execute -ExpectedExitCode 3
 
+        $copiedProductionRoot = Join-Path $sandbox 'production-bundle'
+        Copy-Item -LiteralPath $productionRootPath -Destination $copiedProductionRoot -Recurse
+        $copiedProductionPath = Join-Path $copiedProductionRoot 'Invoke-VisioSharePointSync.Production.ps1'
+        $beforeCopiedBundleRun = @(Get-VssDirectorySnapshot $sandbox) -join [Environment]::NewLine
+        $copiedBundleResult = Invoke-VssProductionCli -ConfigurationPath $executeConfigurationPath -RuntimeConfigurationPath $runtimeEnabledPath -EntryPointPath $copiedProductionPath -AllowExternalSideEffects
+        $afterCopiedBundleRun = @(Get-VssDirectorySnapshot $sandbox) -join [Environment]::NewLine
+        Assert-VssEqual 3 $copiedBundleResult.ExitCode 'Kopiertes Production-Bundle erreicht das Readiness-Gate nicht.'
+        Assert-VssEqual $beforeCopiedBundleRun $afterCopiedBundleRun 'Kopiertes, Readiness-blockiertes Production-Bundle hat Nebenwirkungen erzeugt.'
+        Assert-VssObservableResultContract -Output $copiedBundleResult.Output -ExpectedMode Execute -ExpectedExitCode 3
+
         $isolatedProductionPath = Join-Path $sandbox 'Invoke-VisioSharePointSync.Production.Isolated.ps1'
         Copy-Item -LiteralPath $productionPath -Destination $isolatedProductionPath
         $bootstrapFailure = Invoke-VssProductionCli -ConfigurationPath $graphConfigurationPath -RuntimeConfigurationPath $runtimeDisabledPath -EntryPointPath $isolatedProductionPath
         Assert-VssEqual 1 $bootstrapFailure.ExitCode 'Fehlende Runtime neben dem Produktiv-CLI muss Exitcode 1 liefern.'
         Assert-VssObservableResultContract -Output $bootstrapFailure.Output -ExpectedMode Execute -ExpectedExitCode 1
 
-        $isolatedPipelinePath = Join-Path $sandbox 'Invoke-VisioSharePointSync.Pipeline.Isolated.ps1'
+        $isolatedPipelinePath = Join-Path $sandbox 'Invoke-VisioSharePointSync.Development.Isolated.ps1'
         Copy-Item -LiteralPath $pipelinePath -Destination $isolatedPipelinePath
         $pipelineBootstrapFailure = Invoke-VssPipelineCli -ConfigurationPath $graphConfigurationPath -RuntimeConfigurationPath $runtimeDisabledPath -EntryPointPath $isolatedPipelinePath -Mode Validate
         Assert-VssEqual 1 $pipelineBootstrapFailure.ExitCode 'Fehlende Runtime neben dem Pipeline-CLI muss Exitcode 1 liefern.'
@@ -453,7 +508,7 @@ try {
 
     Invoke-VssTest -Name 'Graph-Simulation plant rein im Speicher und bleibt nebenwirkungsfrei' -Body {
         $before = @(Get-VssDirectorySnapshot $sandbox) -join [Environment]::NewLine
-        $result = Invoke-VssPipelineCli -ConfigurationPath $graphConfigurationPath -RuntimeConfigurationPath $runtimeDisabledPath -Mode Simulate -AllowExternalSideEffects
+        $result = Invoke-VssPipelineCli -ConfigurationPath $graphConfigurationPath -RuntimeConfigurationPath $runtimeDisabledPath -Mode Simulate
         $after = @(Get-VssDirectorySnapshot $sandbox) -join [Environment]::NewLine
         Assert-VssEqual 0 $result.ExitCode 'Graph-Simulation muss erfolgreich sein.'
         Assert-VssEqual $before $after 'Graph-Simulation hat Dateien oder Verzeichnisse veraendert.'
@@ -483,22 +538,22 @@ try {
     Invoke-VssTest -Name 'Execute verlangt beide Gates und blockiert vor jeder Nebenwirkung' -Body {
         $before = @(Get-VssDirectorySnapshot $sandbox) -join [Environment]::NewLine
 
-        $disabledResult = Invoke-VssPipelineCli -ConfigurationPath $executeConfigurationPath -RuntimeConfigurationPath $runtimeDisabledPath -Mode Execute -AllowExternalSideEffects
+        $disabledResult = Invoke-VssProductionCli -ConfigurationPath $executeConfigurationPath -RuntimeConfigurationPath $runtimeDisabledPath -AllowExternalSideEffects
         Assert-VssEqual 3 $disabledResult.ExitCode 'Execution.Enabled=false muss Execute mit Exitcode 3 blockieren.'
         Assert-VssObservableResultContract -Output $disabledResult.Output -ExpectedMode Execute -ExpectedExitCode 3
         Assert-VssMatches $disabledResult.Output '(?i)Execution\.Enabled' 'Diagnose fuer das Runtime-Execute-Gate fehlt.'
 
-        $switchMissingResult = Invoke-VssPipelineCli -ConfigurationPath $executeConfigurationPath -RuntimeConfigurationPath $runtimeEnabledPath -Mode Execute
+        $switchMissingResult = Invoke-VssProductionCli -ConfigurationPath $executeConfigurationPath -RuntimeConfigurationPath $runtimeEnabledPath
         Assert-VssEqual 3 $switchMissingResult.ExitCode 'Fehlender AllowExternalSideEffects-Schalter muss Exitcode 3 liefern.'
         Assert-VssMatches $switchMissingResult.Output '(?i)AllowExternalSideEffects' 'Diagnose fuer das CLI-Execute-Gate fehlt.'
 
-        $readinessResult = Invoke-VssPipelineCli -ConfigurationPath $executeConfigurationPath -RuntimeConfigurationPath $runtimeEnabledPath -Mode Execute -AllowExternalSideEffects
+        $readinessResult = Invoke-VssProductionCli -ConfigurationPath $executeConfigurationPath -RuntimeConfigurationPath $runtimeEnabledPath -AllowExternalSideEffects
         Assert-VssEqual 3 $readinessResult.ExitCode 'Nicht implementierte produktive Adapter muessen Readiness-Exitcode 3 liefern.'
         foreach ($placeholderId in @('VSS-CNV-001', 'VSS-AUTH-GRAPH-001', 'VSS-INTEGRATION-001', 'VSS-GOLIVE-001')) {
             Assert-VssTrue $readinessResult.Output.Contains($placeholderId) "Readiness-Platzhalter $placeholderId fehlt."
         }
 
-        $restReadinessResult = Invoke-VssPipelineCli -ConfigurationPath $restConfigurationPath -RuntimeConfigurationPath $runtimeEnabledPath -Mode Execute -AllowExternalSideEffects
+        $restReadinessResult = Invoke-VssProductionCli -ConfigurationPath $restConfigurationPath -RuntimeConfigurationPath $runtimeEnabledPath -AllowExternalSideEffects
         Assert-VssEqual 3 $restReadinessResult.ExitCode 'Nicht freigegebener REST-Execute-Pfad muss Exitcode 3 liefern.'
         foreach ($placeholderId in @('VSS-SPREST-LARGE-001', 'VSS-SPREST-PATH-001', 'VSS-INTEGRATION-001', 'VSS-GOLIVE-001')) {
             Assert-VssTrue $restReadinessResult.Output.Contains($placeholderId) "REST-Readiness-Platzhalter $placeholderId fehlt."
@@ -509,7 +564,7 @@ try {
     }
 
     Invoke-VssTest -Name 'Ungueltige Fachkonfiguration bleibt Exitcode 2 statt Readiness 3' -Body {
-        $result = Invoke-VssPipelineCli -ConfigurationPath $incompleteFixturePath -RuntimeConfigurationPath $runtimeEnabledPath -Mode Execute -AllowExternalSideEffects
+        $result = Invoke-VssProductionCli -ConfigurationPath $incompleteFixturePath -RuntimeConfigurationPath $runtimeEnabledPath -AllowExternalSideEffects
         Assert-VssEqual 2 $result.ExitCode 'Fachkonfigurationsfehler muessen vor Execute-Readiness mit Exitcode 2 enden.'
         Assert-VssObservableResultContract -Output $result.Output -ExpectedMode Execute -ExpectedExitCode 2
     }
@@ -864,7 +919,7 @@ try {
 
     Invoke-VssTest -Name 'Bestehende Scaffold-Tests bleiben als Regression gruen' -Body {
         $legacy = Invoke-VssPowerShellFile -Path $legacyTestPath
-        Assert-VssEqual 0 $legacy.ExitCode 'Bestehende Test-Scaffold.ps1 ist fehlgeschlagen.'
+        Assert-VssEqual 0 $legacy.ExitCode 'Test-LegacyScaffold.ps1 ist fehlgeschlagen.'
         Assert-VssMatches $legacy.Output 'Ergebnis:\s*[0-9]+ bestanden, 0 fehlgeschlagen\.' 'Bestehende Tests melden Fehlschlaege oder keinen stabilen Abschluss.'
     }
 }

@@ -5,9 +5,9 @@ Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 
 $projectRoot = Split-Path -Path $PSScriptRoot -Parent
-$corePath = Join-Path $projectRoot 'src\VisioSharePointSync.Core.ps1'
-$adapterPath = Join-Path $projectRoot 'src\VisioSharePointSync.Adapters.ps1'
-$cliPath = Join-Path $projectRoot 'src\Invoke-VisioSharePointSync.ps1'
+$corePath = Join-Path $projectRoot 'src\production\VisioSharePointSync.Core.ps1'
+$adapterPath = Join-Path $projectRoot 'src\legacy\VisioSharePointSync.AdapterStubs.Legacy.ps1'
+$cliPath = Join-Path $projectRoot 'src\legacy\Invoke-VisioSharePointSync.Legacy.ps1'
 $decisionRegisterPath = Join-Path $projectRoot 'docs\OFFENE-FRAGEN.md'
 $completePath = Join-Path $PSScriptRoot 'fixtures\complete.config.json'
 $invalidPath = Join-Path $PSScriptRoot 'fixtures\invalid.config.json'
@@ -538,6 +538,7 @@ Invoke-VssTest -Name 'CLI-Exitcodes 0, 2 und interner Catch 1 bleiben stabil' -B
     $dryRunCli = Invoke-VssCli $completePath DryRun $null
     Assert-VssEqual 0 $validCli.ExitCode 'Vollstaendige CLI-Config muss Exit 0 liefern.'
     Assert-VssTrue ($validCli.Output -match 'Modus: Validate') 'Default-Modus ist nicht Validate.'
+    Assert-VssTrue ($validCli.Output -match 'LEGACY-Geruest') 'Alter CLI-Einstieg ist nicht sichtbar als Legacy gekennzeichnet.'
     Assert-VssEqual 2 $incompleteCli.ExitCode 'Unvollstaendige CLI-Config muss Exit 2 liefern.'
     Assert-VssEqual 2 $invalidCli.ExitCode 'Ungueltige CLI-Config muss Exit 2 liefern.'
     Assert-VssEqual 2 $secretCli.ExitCode 'Secret-Config muss Exit 2 liefern.'

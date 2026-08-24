@@ -8,21 +8,23 @@ param(
     [ValidateNotNullOrEmpty()]
     [string]$RuntimeConfigurationPath,
 
-    [ValidateSet('Validate', 'Simulate', 'Execute')]
-    [string]$Mode = 'Validate',
-
-    [switch]$AllowExternalSideEffects
+    [ValidateSet('Validate', 'Simulate')]
+    [string]$Mode = 'Validate'
 )
 
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 
+# Development and acceptance entry point. Production automation must use the
+# dedicated script under src\production and never this multi-mode entry point.
 $bootstrapRunId = [guid]::NewGuid().ToString('D')
 $bootstrapStartedUtc = [DateTime]::UtcNow.ToString('o')
 
 try {
-    $corePath = Join-Path -Path $PSScriptRoot -ChildPath 'VisioSharePointSync.Core.ps1'
-    $runtimePath = Join-Path -Path $PSScriptRoot -ChildPath 'VisioSharePointSync.Pipeline.Runtime.ps1'
+    $srcRoot = Split-Path -Path $PSScriptRoot -Parent
+    $productionRoot = Join-Path -Path $srcRoot -ChildPath 'production'
+    $corePath = Join-Path -Path $productionRoot -ChildPath 'VisioSharePointSync.Core.ps1'
+    $runtimePath = Join-Path -Path $productionRoot -ChildPath 'VisioSharePointSync.Pipeline.Runtime.ps1'
     $simulationPath = Join-Path -Path $PSScriptRoot -ChildPath 'VisioSharePointSync.Pipeline.Simulation.ps1'
     . $corePath
     . $runtimePath
@@ -32,7 +34,6 @@ try {
         ConfigurationPath        = $ConfigurationPath
         RuntimeConfigurationPath = $RuntimeConfigurationPath
         Mode                     = $Mode
-        AllowExternalSideEffects = $AllowExternalSideEffects
     }
     $pipelineResult = Invoke-VisioSharePointSyncPipeline @pipelineParameters
 

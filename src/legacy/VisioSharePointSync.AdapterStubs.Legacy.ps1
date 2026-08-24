@@ -1,7 +1,7 @@
 Set-StrictMode -Version 2.0
 
-# This file documents the future side-effect boundaries. The public scaffold does
-# not dot-source this file and exposes no Execute mode. Every adapter deliberately
+# LEGACY adapter stubs from the first Validate/DryRun scaffold. The production
+# and development entry points do not dot-source this file. Every function
 # throws so that it cannot accidentally become a productive path.
 
 function Invoke-VssSourceInventoryAdapter {

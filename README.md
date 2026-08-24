@@ -2,112 +2,83 @@
 
 Dieses Repository enthält den ersten, bewusst sicheren Projektmeilenstein für einen späteren Visio-zu-PDF-Abgleich zwischen einem Netzlaufwerk und SharePoint. `Validate` bleibt rein lesend; `Simulate` durchläuft die vollständige Pipeline ausschließlich mit In-Memory-Adaptern. Reale UNC-, COM- und SharePoint-Aufrufe bleiben durch die Execute-Gates und sichtbare Implementierungsplatzhalter gesperrt.
 
-## Enthaltene Artefakte
+## Verzeichnisstruktur
 
-- `docs/Offene-Fragen.xlsx` ist das führende Entscheidungsregister für die technische Abstimmung.
-- `docs/OFFENE-FRAGEN.md` ist der versionierbare Snapshot des initialen Fragenbestands vom 21.08.2026.
-- `config/sync.example.json` zeigt das geplante Konfigurationsschema mit ausdrücklich offenen Werten.
-- `config/runtime.example.json` beschreibt getrennt davon sichere Laufzeitvorgaben und ist standardmäßig nicht zur Ausführung freigegeben.
-- `src/Invoke-VisioSharePointSync.ps1` validiert eine Konfiguration oder zeigt im Dry-Run ausschließlich die später vorgesehenen Phasen.
-- `src/Invoke-VisioSharePointSync.Pipeline.ps1` ist ein separater Einstieg für die abgesicherte Pipeline-Vorbereitung mit `Validate`, `Simulate` und `Execute`.
-- `src/Invoke-VisioSharePointSync.Production.ps1` ist der eigenständige Einstieg für den späteren Produktivbetrieb. Er besitzt keinen Modus-Schalter und startet ausschließlich den abgesicherten `Execute`-Pfad.
-- `src/VisioSharePointSync.Pipeline.Runtime.ps1` enthält die gemeinsame Validierungs-, Sicherheits- und Ablauflogik ohne Fake-Adapter.
-- `src/VisioSharePointSync.Pipeline.Simulation.ps1` enthält ausschließlich die In-Memory-Adapter und wird nur vom Pipeline-Einstieg geladen, niemals vom Produktiv-Einstieg.
-- `tests/Test-Scaffold.ps1` prüft das Gerüst ohne externe Testmodule.
-- `tests/Test-PipelineScaffold.ps1` prüft die Pipeline-Grenzen und insbesondere, dass keine unbeabsichtigten externen Zugriffe stattfinden.
+Die Skripte sind nach ihrem Einsatzzweck getrennt. Nur `src/production` gehört in ein späteres Betriebspaket:
 
-## Sicherer Aufruf
+```text
+src/
+├─ production/   Produktiveinstieg sowie seine beiden Laufzeitabhängigkeiten
+├─ development/  Validierung, Simulation und In-Memory-Adapter
+└─ legacy/       Veralteter Erststand und nicht ausführbare alte Adapter-Stubs
+tests/           Automatisierte Tests und ausschließlich synthetische Fixtures
+```
 
-Die Skripte sind für Windows PowerShell 5.1-kompatible Syntax ausgelegt und benötigen in diesem Meilenstein keine externen Module.
+- `src/production` ist als Einheit kopierbar und enthält keine Simulationsdatei.
+- `src/development` bietet ausschließlich `Validate` und `Simulate`; ein `Execute`-Parameter existiert dort nicht.
+- `src/legacy` dient nur der Nachvollziehbarkeit und Kompatibilität. Für neue Abläufe dürfen diese Dateien nicht verwendet werden.
+- `docs/Offene-Fragen.xlsx` ist das führende Entscheidungsregister; `docs/OFFENE-FRAGEN.md` ist sein versionierbarer Snapshot.
+- `config/sync.example.json` und `config/runtime.example.json` sind sichere, bewusst nicht produktionsfähige Beispiele.
+
+Eine kurze Zuordnung jeder Quelldatei steht zusätzlich in `src/README.md`. Alle Skripte bleiben mit Windows PowerShell 5.1 kompatibel und benötigen derzeit keine externen Module.
+
+## Legacy-Einstieg – nur Altbestand
+
+`src/legacy/Invoke-VisioSharePointSync.Legacy.ps1` ist sichtbar als Legacy gekennzeichnet und bleibt ausschließlich für das erste Validate/DryRun-Gerüst erhalten:
 
 ```powershell
-# Konfiguration ausschließlich validieren (Standardmodus)
-powershell.exe -NoProfile -File .\src\Invoke-VisioSharePointSync.ps1 `
+powershell.exe -NoProfile -File .\src\legacy\Invoke-VisioSharePointSync.Legacy.ps1 `
   -ConfigurationPath .\config\sync.example.json
 
-# Geplante Phasen anzeigen, weiterhin ohne operative Zugriffe
-pwsh -NoProfile -File .\src\Invoke-VisioSharePointSync.ps1 `
+pwsh -NoProfile -File .\src\legacy\Invoke-VisioSharePointSync.Legacy.ps1 `
   -ConfigurationPath .\config\sync.example.json `
   -Mode DryRun
 ```
 
-Erwartete Exitcodes:
+Die Beispielkonfiguration ist absichtlich unvollständig und liefert Exitcode `2`. Für programmgesteuerte Prüfungen kann `src/production/VisioSharePointSync.Core.ps1` eingebunden und `Invoke-VisioSharePointSyncAssessment` aufgerufen werden. Im Legacy-Modus `DryRun` werden die späteren Stufen ausschließlich beschrieben und nicht ausgeführt.
 
-- `0`: Konfiguration ist vollständig und gültig.
-- `2`: Pflichtentscheidungen sind offen oder die Konfiguration ist ungültig.
-- `1`: Unerwarteter technischer Fehler beim Laden oder Validieren.
+## Entwicklungs- und Abnahme-Einstieg
 
-Die Beispielkonfiguration ist absichtlich unvollständig und liefert daher Exitcode `2` sowie die zugehörigen Entscheidungs-IDs.
-
-Für eine programmgesteuerte Auswertung kann `src/VisioSharePointSync.Core.ps1` eingebunden und `Invoke-VisioSharePointSyncAssessment` aufgerufen werden. Das Ergebnisobjekt enthält ausschließlich:
-
-- `IsValid`
-- `Errors`
-- `Warnings`
-- `UnresolvedDecisionIds`
-- `PlannedStages`
-
-Im Modus `DryRun` sind die späteren Stufen `InventorySource`, `StageStableSource`, `ConvertVisioToPdf`, `EnsureSharePointFolders`, `UploadOrUpdatePdf`, `ReconcileLocalAndRemoteState`, `PersistSyncState` und `SummarizeRun` nur beschreibende Einträge; keine dieser Stufen wird ausgeführt.
-
-## Separater Pipeline-Einstieg
-
-Der bisherige Einstieg `src/Invoke-VisioSharePointSync.ps1` und sein Verhalten bleiben unverändert: Er kennt weiterhin ausschließlich `Validate` und `DryRun`, lädt keine ausführbaren Adapter und besitzt keinen `Execute`-Modus. Der neue Einstieg `src/Invoke-VisioSharePointSync.Pipeline.ps1` ergänzt dieses sichere Gerüst, ersetzt es aber nicht.
-
-Die Pipeline erhält sowohl die fachliche Sync-Konfiguration als auch eine getrennte Laufzeitkonfiguration:
+Der Development-Einstieg lädt Core und Runtime aus `src/production` sowie die getrennten In-Memory-Adapter aus `src/development`. Er erlaubt nur `Validate` und `Simulate`:
 
 ```powershell
-# Beide Konfigurationen validieren; dies ist zugleich der Standardmodus
-pwsh -NoProfile -File .\src\Invoke-VisioSharePointSync.Pipeline.ps1 `
+# Beide Konfigurationen validieren
+pwsh -NoProfile -File .\src\development\Invoke-VisioSharePointSync.Development.ps1 `
   -ConfigurationPath .\tests\fixtures\complete.config.json `
   -RuntimeConfigurationPath .\config\runtime.example.json `
   -Mode Validate
 
-# Plan und Bereitschaft ohne externe Seiteneffekte simulieren
-pwsh -NoProfile -File .\src\Invoke-VisioSharePointSync.Pipeline.ps1 `
+# Den vollständigen Orchestrator ohne externe Seiteneffekte simulieren
+pwsh -NoProfile -File .\src\development\Invoke-VisioSharePointSync.Development.ps1 `
   -ConfigurationPath .\tests\fixtures\complete.config.json `
   -RuntimeConfigurationPath .\config\runtime.example.json `
   -Mode Simulate
-
-# Zeigt mit der Beispielkonfiguration das sichere Blockieren eines Execute-Versuchs
-pwsh -NoProfile -File .\src\Invoke-VisioSharePointSync.Pipeline.ps1 `
-  -ConfigurationPath .\tests\fixtures\complete.config.json `
-  -RuntimeConfigurationPath .\config\runtime.example.json `
-  -Mode Execute `
-  -AllowExternalSideEffects
 ```
 
-Die Modi haben klar getrennte Aufgaben:
+`Validate` ruft keine Adapter auf. `Simulate` verwendet Fake-Inventar, Fake-PDF, Fake-Remote-ID/eTag, In-Memory-State und In-Memory-Log. Außer dem Lesen der beiden JSON-Dateien gibt es keine Datei-, COM- oder Netzwerkoperation. Konfigurationen unter `tests/fixtures` sind ausschließlich Testdaten.
 
-- `Validate` prüft beide Konfigurationen, ohne Pipeline-Adapter aufzurufen.
-- `Simulate` durchläuft denselben Orchestrator wie der spätere Echtlauf mit deterministischem Fake-Inventar, Fake-PDF, Fake-Remote-ID/eTag, In-Memory-State und In-Memory-Log. Außer dem Lesen der zwei JSON-Dateien gibt es keine Datei-, COM- oder Netzwerkoperation.
-- `Execute` ist für einen späteren operativen Lauf reserviert. Eine Freigabe erfordert gleichzeitig den CLI-Schalter `-AllowExternalSideEffects` und `Execution.Enabled: true` in der Runtime-Konfiguration. Zusätzlich müssen sämtliche für die gewählte Route benötigten Fähigkeiten den Status `Ready` besitzen.
+## Produktiv-Einstieg
 
-Diese doppelte Execute-Freigabe und die Bereitschaftsprüfung arbeiten fail-closed: Fehlt eine Bedingung, endet die Pipeline vor externen Seiteneffekten mit Exitcode `3`. Der Schalter allein aktiviert daher nichts.
-
-`config/runtime.example.json` verwendet sichere Standardwerte. `Execution.Enabled` ist `false`; `Conversion.AdapterKind`, `Conversion.AdapterVersion` und `Operations.QuarantinePath` enthalten den sichtbaren Wert `__PLACEHOLDER_REQUIRED__`, und `Conversion.ExternalExecutablePath` ist `null`. Solche Platzhalter werden weder automatisch ersetzt noch als Implementierung gewertet. Für lokale, nicht eingecheckte Laufzeitwerte ist `config/runtime.local.json` vorgesehen.
-
-Der aktuelle Stand enthält weiterhin keinen produktiven Visio-Konverter, keine reale Authentifizierung und keinen ausführbaren Graph- oder SharePoint-Upload. Das Ersetzen von Platzhalterwerten macht eine Route allein nicht `Ready`; ein `Execute`-Versuch bleibt gesperrt, solange die benötigten Fähigkeiten nicht implementiert und bereit sind.
-
-Exitcodes des separaten Pipeline-Einstiegs:
-
-- `0`: Der angeforderte Modus wurde erfolgreich abgeschlossen.
-- `1`: Ein unerwarteter interner Fehler ist aufgetreten.
-- `2`: Eine Konfiguration ist ungültig, unvollständig oder nicht lesbar.
-- `3`: Die Ausführung wurde sicher blockiert oder die gewählte Route ist nicht bereit.
-- `4`: Ein erwarteter operativer Fehler oder Teilerfolg ist in einem später freigegebenen Lauf aufgetreten.
-
-## Eigener Produktiv-Einstieg
-
-Für den späteren unbeaufsichtigten Betrieb gibt es einen bewusst kleinen, separaten Einstieg ohne `Validate`-, `DryRun`- oder `Simulate`-Auswahl. Er lädt nur den Konfigurations-Core und die gemeinsame Runtime, nicht die getrennte Simulationsdatei. Den Modus setzt er intern fest auf `Execute`; dadurch bleibt die produktive Bedienoberfläche testfrei, ohne eine zweite, abweichende Kopie der Ablauf- und Sicherheitslogik zu erzeugen.
+Für den späteren unbeaufsichtigten Betrieb existiert ausschließlich `src/production/Invoke-VisioSharePointSync.Production.ps1`. Er besitzt keinen Modus-Schalter, lädt nur die beiden Dateien aus demselben Ordner und setzt intern fest `Execute`:
 
 ```powershell
-pwsh -NoProfile -File .\src\Invoke-VisioSharePointSync.Production.ps1 `
+pwsh -NoProfile -File .\src\production\Invoke-VisioSharePointSync.Production.ps1 `
   -ConfigurationPath .\config\sync.local.json `
   -RuntimeConfigurationPath .\config\runtime.local.json `
   -AllowExternalSideEffects
 ```
 
-Die doppelte Freigabe bleibt erhalten: `-AllowExternalSideEffects` und `Runtime.Execution.Enabled: true` müssen gleichzeitig gesetzt sein. Danach müssen weiterhin sämtliche benötigten Adapterfähigkeiten und die Go-live-Freigabe den Status `Ready` besitzen. Bis die weiter unten genannten Integrationsplatzhalter implementiert und fachlich freigegeben sind, endet auch dieser Einstieg sicher mit Exitcode `3`, bevor UNC-, COM- oder SharePoint-Zugriffe stattfinden. Konfigurationen unter `tests/fixtures` sind ausschließlich Testdaten und dürfen für diesen Aufruf nicht verwendet werden.
+Die doppelte Freigabe bleibt erhalten: `-AllowExternalSideEffects` und `Runtime.Execution.Enabled: true` müssen gleichzeitig gesetzt sein. Danach müssen sämtliche benötigten Adapterfähigkeiten und die Go-live-Freigabe den Status `Ready` besitzen. Fehlt eine Bedingung, endet der Aufruf fail-closed mit Exitcode `3`, bevor Lock, UNC-, COM-, lokale Schreib- oder SharePoint-Zugriffe stattfinden.
+
+`config/runtime.example.json` verwendet sichere Standardwerte: `Execution.Enabled` ist `false`, und offene Laufzeitwerte tragen `__PLACEHOLDER_REQUIRED__`. Der aktuelle Stand enthält weiterhin keinen produktiven Visio-Konverter, keine reale Authentifizierung und keinen freigegebenen Graph- oder SharePoint-Upload. Das Ersetzen von Konfigurationswerten allein macht die Adapter nicht `Ready`.
+
+Exitcodes des Produktiv-Einstiegs:
+
+- `0`: Der spätere operative Lauf wurde erfolgreich abgeschlossen.
+- `1`: Ein unerwarteter interner Fehler ist aufgetreten.
+- `2`: Eine Konfiguration ist ungültig, unvollständig oder nicht lesbar.
+- `3`: Die Ausführung wurde vor Nebenwirkungen sicher blockiert.
+- `4`: Ein erwarteter operativer Fehler oder Teilerfolg ist aufgetreten.
 
 ## Konfiguration
 
@@ -143,18 +114,18 @@ Graph-Site-, Drive- und Ordner-IDs werden als undurchsichtige Einzelsegmentwerte
 - Anlage, Aktualisierung, Verschiebung oder Löschung von SharePoint-Inhalten
 - Aufgabenplanung, Dauerbetrieb oder Alarmierung; lokale State-/Staging-Funktionen und ihre In-Memory-Abnahme sind vorhanden, werden produktiv jedoch erst nach vollständiger Freigabe verwendet
 
-Die späteren Adaptergrenzen sind in `src/VisioSharePointSync.Adapters.ps1` dokumentiert, werden vom öffentlichen Einstiegspunkt nicht geladen und sind absichtlich nicht ausführbar.
+Die alten Adapter-Stubs liegen sichtbar als Legacy unter `src/legacy/VisioSharePointSync.AdapterStubs.Legacy.ps1`. Sie werden von keinem aktuellen Einstieg geladen und sind absichtlich nicht ausführbar.
 
 ## Tests
 
 ```powershell
-pwsh -NoProfile -File .\tests\Test-Scaffold.ps1
-powershell.exe -NoProfile -File .\tests\Test-Scaffold.ps1
-pwsh -NoProfile -File .\tests\Test-PipelineScaffold.ps1
-powershell.exe -NoProfile -File .\tests\Test-PipelineScaffold.ps1
+pwsh -NoProfile -File .\tests\Test-LegacyScaffold.ps1
+powershell.exe -NoProfile -File .\tests\Test-LegacyScaffold.ps1
+pwsh -NoProfile -File .\tests\Test-DevelopmentPipeline.ps1
+powershell.exe -NoProfile -File .\tests\Test-DevelopmentPipeline.ps1
 ```
 
-Die Testläufe nutzen nur PowerShell-Bordmittel. `Test-Scaffold.ps1` prüft unter anderem vollständige, unvollständige und unzulässige Konfigurationen, das exakte 18-Blocker-Gate, BOM-loses UTF-8 mit Umlauten, konditionale Graph-/REST- und Authentifizierungsvarianten, geschlossene und redigierte Schlüsselvalidierung einschließlich doppelter JSON-Schlüssel, Graph-ID- und Pfadsyntax, den Regex-Timeout, stabile Exitcodes sowie die garantierte Nebenwirkungsfreiheit des Dry-Runs. `Test-PipelineScaffold.ps1` prüft zusätzlich die Runtime-Konfiguration, die physische Trennung des Produktiv-Einstiegs von den Simulationsadaptern, vollständige Bootstrap-Ergebnisse, Modusgrenzen, Execute-Sperren, die vollständige Fake-Adapter-Stagefolge, Commit-vor-State, unveränderte Dateien, Teilerfolg, Inventur-/State-Blockaden, Zielkollisionen, Remote-ID-/Provenienz-/eTag-Sicherheit, Retry mit Fake-Uhr, atomaren State-Replace und die Log-Positivliste.
+Die Testläufe nutzen nur PowerShell-Bordmittel. `Test-LegacyScaffold.ps1` prüft den ausdrücklich veralteten Erststand sowie die reine Konfigurationslogik. `Test-DevelopmentPipeline.ps1` prüft zusätzlich die Runtime-Konfiguration, die physische Trennung des Produktiv-Einstiegs von den Simulationsadaptern, das eigenständig kopierbare Production-Bundle, vollständige Bootstrap-Ergebnisse, Modusgrenzen, Execute-Sperren, die vollständige Fake-Adapter-Stagefolge, Commit-vor-State, unveränderte Dateien, Teilerfolg, Inventur-/State-Blockaden, Zielkollisionen, Remote-ID-/Provenienz-/eTag-Sicherheit, Retry mit Fake-Uhr, atomaren State-Replace und die Log-Positivliste.
 
 ## Technische Referenzen
 
