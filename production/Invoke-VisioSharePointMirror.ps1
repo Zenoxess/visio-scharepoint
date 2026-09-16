@@ -1,61 +1,22 @@
 <#
 .SYNOPSIS
-Spiegelt Visio-Dateien aus einem Windows-Quellordner als PDF nach SharePoint.
+Spiegelt Visio-Dateien als PDFs nach SharePoint.
 
 .DESCRIPTION
-Dieses Skript besitzt genau einen Betriebsablauf: den vollstaendigen Spiegelabgleich.
-Es durchsucht SourcePath einschliesslich aller Unterordner nach .vsd, .vsdx und .vsdm,
-konvertiert jede gefundene Datei mit lokal installiertem Microsoft Visio in PDF und
-bildet den Pfad einschliesslich des Quellordnernamens unter TargetFolderPath ab.
+Einziger Betriebsmodus: vollstaendiger Spiegelabgleich. Das Skript sucht
+rekursiv nach .vsd, .vsdx und .vsdm, konvertiert mit lokalem Visio und bildet
+den Pfad inklusive Quellordnername ab:
 
-Beispiel der Pfadabbildung:
-P:\Quelle\A\B\Datei.vsdx
-  -> <TargetFolderPath>\Quelle\A\B\Datei.pdf
+P:\Quelle\A\B\Datei.vsdx -> <TargetFolderPath>\Quelle\A\B\Datei.pdf
 
-Die JSON-Konfiguration enthaelt genau diese sechs Werte:
-- SourcePath: Absoluter lokaler Pfad, Netzlaufwerkspfad oder UNC-Quellpfad.
-- SharePointSiteUrl: HTTPS-URL der SharePoint-Site.
-- LibraryName: Anzeigename der SharePoint-Dokumentbibliothek.
-- TargetFolderPath: Relativer, bereits vorhandener Zielordner in der Bibliothek.
-- TargetFolderUniqueId: SharePoint-UniqueId dieses Zielordners als GUID.
-- LogPath: Absoluter Pfad der fortlaufenden Text-Logdatei.
+Die Konfiguration enthaelt nur SourcePath, SharePointSiteUrl, LibraryName,
+TargetFolderPath, TargetFolderUniqueId und LogPath. Werte mit
+__PLATZHALTER_...__ sind Vorlagen und stoppen den Lauf.
 
-Sicherheits- und Bereinigungsverhalten:
-- Der Zielordner ist dediziert. Saemtliche Inhalte darunter duerfen durch den
-  Spiegel ersetzt oder in den SharePoint-Papierkorb verschoben werden.
-- Der konfigurierte Zielordner selbst wird niemals entfernt.
-- Pfad und TargetFolderUniqueId muessen zusammenpassen. Andernfalls erfolgen weder
-  Uploads noch Papierkorbaktionen.
-- Erst nach erfolgreicher Konvertierung aller Visio-Dateien wird SharePoint veraendert.
-- Erst nach erfolgreichen Uploads, erneuter Quellpruefung und Zielinventur werden
-  ueberzaehlige Dateien und Ordner recycelt.
-- Ist die Quelle leer, werden alle Inhalte unterhalb des Zielordners recycelt.
-- Die aktuelle Windows-Identitaet wird fuer Quelle und SharePoint verwendet;
-  Zugangsdaten werden weder abgefragt noch gespeichert.
-
-Bewusst nicht enthalten sind Preview-, Validate-, Simulate- oder DryRun-Modi,
-interne Selbsttests, ein inkrementeller Synchronisations-State und eine
-Aufgabenplanung. Geplante Laeufe werden ueber die Windows-Aufgabenplanung gestartet.
-
-Die ausgelieferte mirror.json ist eine Vorlage. Jeder Wert mit dem Muster
-__PLATZHALTER_...__ muss vor dem ersten Lauf ersetzt werden. Im produktiven
-PowerShell-Code selbst gibt es keine Platzhalterimplementierungen.
-
-.PARAMETER ConfigurationPath
-Pfad zur UTF-8-kodierten JSON-Konfiguration mit den oben beschriebenen sechs Werten.
-
-.EXAMPLE
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Invoke-VisioSharePointMirror.ps1 -ConfigurationPath .\mirror.json
-
-.NOTES
-Voraussetzungen: Windows PowerShell 5.1, Windows, lokal installiertes und fuer das
-Ausfuehrungskonto initialisiertes Microsoft Visio, Zugriff auf den vollstaendig
-lesbaren Quellbaum sowie Schreib- und Papierkorbrechte im dedizierten SharePoint-Ziel.
-Die Dokumentbibliothek darf kein erzwungenes Auschecken verlangen.
-
-Die TargetFolderUniqueId kann die SharePoint-Administration schreibgeschuetzt ueber
-<SharePointSiteUrl>/_api/web/GetFolderByServerRelativeUrl('<serverrelativer Zielpfad>')?$select=UniqueId
-ermitteln. Der dort gelieferte Wert muss zum konfigurierten Zielpfad gehoeren.
+Der SharePoint-Zielordner ist dediziert: Inhalte darunter duerfen nach einem
+vollstaendig erfolgreichen Lauf in den Papierkorb verschoben werden. Der
+Zielordner selbst wird nie geloescht. Es gibt keine Preview-, Test-, DryRun-,
+State- oder Scheduler-Logik.
 #>
 
 #requires -Version 5.1
@@ -71,747 +32,449 @@ param(
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 
-# Visio-COM benoetigt einen STA-Thread. Windows PowerShell 5.1 startet normalerweise
-# bereits in STA; bei einem abweichenden Host wird derselbe Lauf einmalig in STA neu gestartet.
+# Visio-COM braucht STA. Falls ein fremder Host MTA nutzt, startet sich das Skript
+# einmalig selbst in STA neu.
 if ([Threading.Thread]::CurrentThread.ApartmentState -ne [Threading.ApartmentState]::STA) {
-    if ([string]::IsNullOrWhiteSpace($PSCommandPath)) {
-        throw 'Das Spiegel-Skript muss aus einer Datei gestartet werden.'
-    }
-    $hostExecutable = [Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
-    & $hostExecutable -NoLogo -NoProfile -STA -File $PSCommandPath -ConfigurationPath $ConfigurationPath
+    if ([string]::IsNullOrWhiteSpace($PSCommandPath)) { throw 'Das Skript muss aus einer Datei gestartet werden.' }
+    & ([Diagnostics.Process]::GetCurrentProcess().MainModule.FileName) -NoLogo -NoProfile -STA -File $PSCommandPath -ConfigurationPath $ConfigurationPath
     exit $LASTEXITCODE
 }
 
-# Feste Betriebsvorgaben, keine Platzhalter: unterstuetzte Quellen, REST-Zeitlimit
-# und integrierte Windows-Authentifizierung fuer alle SharePoint-Aufrufe.
-$script:MirrorLogPath = $null
-$script:MirrorUtf8NoBom = New-Object System.Text.UTF8Encoding($false)
+$script:LogPath = $null
+$script:Utf8NoBom = New-Object Text.UTF8Encoding($false)
 $script:AllowedExtensions = @('.vsd', '.vsdx', '.vsdm')
-$script:SharePointTimeoutSeconds = 300
-$script:SharePointHeaders = @{
+$script:SpTimeoutSeconds = 300
+$script:SpHeaders = @{
     Accept                         = 'application/json;odata=verbose'
     'X-FORMS_BASED_AUTH_ACCEPTED' = 'f'
 }
 
-# -----------------------------------------------------------------------------
-# Allgemeine Hilfsfunktionen und Konfiguration
-# -----------------------------------------------------------------------------
-
-function Write-MirrorLog {
-    param(
-        [Parameter(Mandatory = $true)][ValidateSet('INFO', 'WARN', 'ERROR')][string]$Level,
-        [Parameter(Mandatory = $true)][string]$Message
-    )
-
+function Write-Log {
+    param([ValidateSet('INFO', 'WARN', 'ERROR')][string]$Level, [string]$Message)
     $line = '{0} [{1}] {2}' -f [DateTime]::Now.ToString('yyyy-MM-dd HH:mm:ss'), $Level, $Message
     [Console]::WriteLine($line)
-    if (-not [string]::IsNullOrWhiteSpace($script:MirrorLogPath)) {
-        [IO.File]::AppendAllText($script:MirrorLogPath, $line + [Environment]::NewLine, $script:MirrorUtf8NoBom)
-    }
+    if ($script:LogPath) { [IO.File]::AppendAllText($script:LogPath, $line + [Environment]::NewLine, $script:Utf8NoBom) }
 }
 
-function Test-ObjectProperty {
-    param(
-        [AllowNull()][object]$InputObject,
-        [Parameter(Mandatory = $true)][string]$Name
-    )
+function Has-Property {
+    param([AllowNull()][object]$InputObject, [string]$Name)
+    return ($null -ne $InputObject -and $null -ne $InputObject.PSObject.Properties[$Name])
+}
 
-    if ($null -eq $InputObject) { return $false }
-    return ($null -ne $InputObject.PSObject.Properties[$Name])
+function ConvertTo-RelativeUrl {
+    param([string]$Path)
+    return $Path.Replace([char]92, [char]47).Trim([char]47)
+}
+
+function Get-PathKey {
+    param([string]$Path)
+    return (ConvertTo-RelativeUrl $Path).Normalize([Text.NormalizationForm]::FormC).ToLowerInvariant()
+}
+
+function ConvertTo-ODataLiteral {
+    param([string]$Value)
+    return $Value.Replace("'", "''")
+}
+
+function Join-SpUrl {
+    param([string]$Base, [string]$Child)
+    $childUrl = ConvertTo-RelativeUrl $Child
+    if ([string]::IsNullOrWhiteSpace($childUrl)) { return $Base.TrimEnd([char]47) }
+    return $Base.TrimEnd([char]47) + '/' + $childUrl
+}
+
+function New-AbsoluteUri {
+    param([string]$Text)
+    return ([uri]$Text).AbsoluteUri
+}
+
+function Test-AbsoluteWindowsPath {
+    param([string]$Path)
+    return $Path -match '^(?:[A-Za-z]:[\\/]|\\\\[^\\/]+[\\/][^\\/]+(?:[\\/]|$))'
 }
 
 function Test-SafeSharePointSegment {
-    param([Parameter(Mandatory = $true)][string]$Segment)
-
+    param([string]$Segment)
     if ([string]::IsNullOrWhiteSpace($Segment) -or $Segment -ne $Segment.Trim()) { return $false }
-    if ($Segment -eq '.' -or $Segment -eq '..' -or $Segment.EndsWith('.')) { return $false }
-    if ($Segment.Length -gt 128) { return $false }
+    if ($Segment -eq '.' -or $Segment -eq '..' -or $Segment.EndsWith('.') -or $Segment.Length -gt 128) { return $false }
     if ($Segment.IndexOfAny([char[]]'~"#%&*:<>?/\{|}[]') -ge 0) { return $false }
-    foreach ($character in $Segment.ToCharArray()) {
-        if ([char]::IsControl($character)) { return $false }
-    }
+    foreach ($char in $Segment.ToCharArray()) { if ([char]::IsControl($char)) { return $false } }
     if ($Segment -match '^(?i:CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:\..*)?$') { return $false }
     if ($Segment -match '^(?i:_vti_)') { return $false }
     return $true
 }
 
-function Get-NormalizedRelativePath {
-    param([Parameter(Mandatory = $true)][string]$Path)
-
-    return $Path.Replace([char]92, [char]47).Trim([char]47)
-}
-
-function Test-AbsoluteWindowsPath {
-    param([Parameter(Mandatory = $true)][string]$Path)
-
-    return $Path -match '^(?:[A-Za-z]:[\\/]|\\\\[^\\/]+[\\/][^\\/]+(?:[\\/]|$))'
-}
-
-function Get-PathKey {
-    param([Parameter(Mandatory = $true)][string]$Path)
-
-    return (Get-NormalizedRelativePath -Path $Path).Normalize([Text.NormalizationForm]::FormC).ToLowerInvariant()
-}
-
-function ConvertTo-ODataLiteral {
-    param([Parameter(Mandatory = $true)][string]$Value)
-
-    return $Value.Replace("'", "''")
-}
-
-function Join-ServerRelativeUrl {
-    param(
-        [Parameter(Mandatory = $true)][string]$Base,
-        [Parameter(Mandatory = $true)][string]$Child
-    )
-
-    $left = $Base.TrimEnd([char]47)
-    $right = (Get-NormalizedRelativePath -Path $Child)
-    if ([string]::IsNullOrWhiteSpace($right)) { return $left }
-    return $left + '/' + $right
-}
-
-function New-AbsoluteUriText {
-    param([Parameter(Mandatory = $true)][string]$Text)
-
-    return ([uri]$Text).AbsoluteUri
-}
-
-function Read-MirrorConfiguration {
-    param([Parameter(Mandatory = $true)][string]$LiteralPath)
-
-    $fullConfigurationPath = [IO.Path]::GetFullPath($LiteralPath)
-    if (-not [IO.File]::Exists($fullConfigurationPath)) {
-        throw 'Die Konfigurationsdatei wurde nicht gefunden.'
+function Assert-SafeRelativePath {
+    param([string]$Path, [string]$ErrorMessage)
+    foreach ($segment in @((ConvertTo-RelativeUrl $Path).Split([char]47))) {
+        if (-not (Test-SafeSharePointSegment $segment)) { throw $ErrorMessage }
     }
+}
+
+function Read-Configuration {
+    param([string]$Path)
+    $configPath = [IO.Path]::GetFullPath($Path)
+    if (-not [IO.File]::Exists($configPath)) { throw 'Die Konfigurationsdatei wurde nicht gefunden.' }
 
     try {
-        $configuration = [IO.File]::ReadAllText($fullConfigurationPath, (New-Object Text.UTF8Encoding($false, $true))) | ConvertFrom-Json
+        $config = [IO.File]::ReadAllText($configPath, (New-Object Text.UTF8Encoding($false, $true))) | ConvertFrom-Json
     }
     catch {
         throw 'Die Konfigurationsdatei ist kein gueltiges UTF-8-JSON.'
     }
 
     $required = @('SourcePath', 'SharePointSiteUrl', 'LibraryName', 'TargetFolderPath', 'TargetFolderUniqueId', 'LogPath')
-    if ($null -eq $configuration -or $configuration -is [array]) {
-        throw 'Die Konfiguration muss genau ein JSON-Objekt enthalten.'
-    }
-    foreach ($name in @($configuration.PSObject.Properties.Name)) {
-        if ($required -cnotcontains $name) { throw 'Die Konfiguration enthaelt einen unbekannten Schluessel.' }
+    if ($null -eq $config -or $config -is [array]) { throw 'Die Konfiguration muss genau ein JSON-Objekt enthalten.' }
+    foreach ($name in @($config.PSObject.Properties.Name)) {
+        if ($required -cnotcontains $name) { throw "Unbekannter Konfigurationswert: $name." }
     }
     foreach ($name in $required) {
-        if (-not (Test-ObjectProperty -InputObject $configuration -Name $name) -or
-            -not ($configuration.$name -is [string]) -or
-            [string]::IsNullOrWhiteSpace([string]$configuration.$name)) {
+        if (-not (Has-Property $config $name) -or -not ($config.$name -is [string]) -or [string]::IsNullOrWhiteSpace([string]$config.$name)) {
             throw "Der Konfigurationswert $name fehlt oder ist leer."
         }
-        # Die Vorlage bleibt absichtlich nicht lauffaehig, bis jeder markierte Wert ersetzt wurde.
-        if ([string]$configuration.$name -like '__PLATZHALTER_*__') {
+        # MARKIERTER PLATZHALTER: Die ausgelieferte mirror.json muss vor Betrieb befuellt werden.
+        if ([string]$config.$name -like '__PLATZHALTER_*__') {
             throw "Der Konfigurationswert $name ist noch ein __PLATZHALTER_...__ und muss ersetzt werden."
         }
     }
 
-    $rawSourcePath = [string]$configuration.SourcePath
-    if (-not (Test-AbsoluteWindowsPath -Path $rawSourcePath)) {
-        throw 'SourcePath muss ein absoluter Windows-Ordner sein.'
-    }
-    $sourcePath = [IO.Path]::GetFullPath($rawSourcePath).TrimEnd([char]92)
+    $sourcePath = [IO.Path]::GetFullPath([string]$config.SourcePath).TrimEnd([char]92)
     $sourceRoot = [IO.Path]::GetPathRoot($sourcePath)
-    if (-not [IO.Path]::IsPathRooted($sourcePath) -or [string]::IsNullOrWhiteSpace($sourceRoot) -or
+    if (-not (Test-AbsoluteWindowsPath $sourcePath) -or [string]::IsNullOrWhiteSpace($sourceRoot) -or
         [string]::Equals($sourcePath, $sourceRoot.TrimEnd([char]92), [StringComparison]::OrdinalIgnoreCase)) {
         throw 'SourcePath muss ein absoluter Windows-Ordner unterhalb einer Laufwerks- oder Freigabewurzel sein.'
     }
 
-    $siteUri = $null
-    try { $siteUri = [uri]([string]$configuration.SharePointSiteUrl) }
+    try { $siteUri = [uri]([string]$config.SharePointSiteUrl) }
     catch { throw 'SharePointSiteUrl ist keine gueltige absolute URL.' }
-    if (-not $siteUri.IsAbsoluteUri -or $siteUri.Scheme -cne 'https' -or
-        -not [string]::IsNullOrWhiteSpace($siteUri.UserInfo) -or
-        -not [string]::IsNullOrWhiteSpace($siteUri.Query) -or
-        -not [string]::IsNullOrWhiteSpace($siteUri.Fragment)) {
+    if (-not $siteUri.IsAbsoluteUri -or $siteUri.Scheme -cne 'https' -or $siteUri.UserInfo -or $siteUri.Query -or $siteUri.Fragment) {
         throw 'SharePointSiteUrl muss eine HTTPS-URL ohne Zugangsdaten, Query oder Fragment sein.'
     }
 
-    $libraryName = ([string]$configuration.LibraryName).Trim()
-    if (-not (Test-SafeSharePointSegment -Segment $libraryName)) {
-        throw 'LibraryName enthaelt einen nicht unterstuetzten Bibliothekstitel.'
-    }
+    $libraryName = ([string]$config.LibraryName).Trim()
+    if (-not (Test-SafeSharePointSegment $libraryName)) { throw 'LibraryName enthaelt einen nicht unterstuetzten Namen.' }
 
-    $rawTargetFolderPath = [string]$configuration.TargetFolderPath
-    if ($rawTargetFolderPath.StartsWith('/') -or $rawTargetFolderPath.StartsWith('\') -or $rawTargetFolderPath.Contains(':')) {
-        throw 'TargetFolderPath muss relativ zur Bibliothekswurzel sein.'
+    $targetFolderPath = ConvertTo-RelativeUrl ([string]$config.TargetFolderPath)
+    if ([string]$config.TargetFolderPath -match '^[\\/]|:' -or [string]::IsNullOrWhiteSpace($targetFolderPath)) {
+        throw 'TargetFolderPath muss ein relativer, dedizierter Unterordner der Bibliothek sein.'
     }
-    $targetFolderPath = Get-NormalizedRelativePath -Path $rawTargetFolderPath
-    if ([string]::IsNullOrWhiteSpace($targetFolderPath)) {
-        throw 'TargetFolderPath muss einen dedizierten Unterordner innerhalb der Bibliothek bezeichnen.'
-    }
-    foreach ($segment in @($targetFolderPath.Split([char]47))) {
-        if (-not (Test-SafeSharePointSegment -Segment $segment)) {
-            throw 'TargetFolderPath enthaelt ein nicht unterstuetztes SharePoint-Pfadsegment.'
-        }
-    }
+    Assert-SafeRelativePath $targetFolderPath 'TargetFolderPath enthaelt ein nicht unterstuetztes SharePoint-Pfadsegment.'
 
-    $targetFolderId = [guid]::Empty
-    if (-not [guid]::TryParse([string]$configuration.TargetFolderUniqueId, [ref]$targetFolderId) -or
-        $targetFolderId -eq [guid]::Empty) {
+    $targetId = [guid]::Empty
+    if (-not [guid]::TryParse([string]$config.TargetFolderUniqueId, [ref]$targetId) -or $targetId -eq [guid]::Empty) {
         throw 'TargetFolderUniqueId muss eine gueltige, nicht leere GUID sein.'
     }
 
-    $rawLogPath = [string]$configuration.LogPath
-    if (-not (Test-AbsoluteWindowsPath -Path $rawLogPath)) { throw 'LogPath muss ein absoluter Dateipfad sein.' }
-    $logPath = [IO.Path]::GetFullPath($rawLogPath)
+    $logPath = [IO.Path]::GetFullPath([string]$config.LogPath)
+    if (-not (Test-AbsoluteWindowsPath $logPath)) { throw 'LogPath muss ein absoluter Dateipfad sein.' }
 
-    return [pscustomobject][ordered]@{
+    [pscustomobject][ordered]@{
         SourcePath           = $sourcePath
         SharePointSiteUrl    = $siteUri.AbsoluteUri.TrimEnd([char]47)
         LibraryName          = $libraryName
         TargetFolderPath     = $targetFolderPath
-        TargetFolderUniqueId = $targetFolderId
+        TargetFolderUniqueId = $targetId
         LogPath              = $logPath
     }
 }
 
-function Initialize-MirrorLog {
-    param([Parameter(Mandatory = $true)][string]$LiteralPath)
-
-    $parent = [IO.Path]::GetDirectoryName($LiteralPath)
+function Initialize-Log {
+    param([string]$Path)
+    $parent = [IO.Path]::GetDirectoryName($Path)
     if ([string]::IsNullOrWhiteSpace($parent)) { throw 'LogPath besitzt keinen gueltigen Elternordner.' }
     if (-not [IO.Directory]::Exists($parent)) { [void][IO.Directory]::CreateDirectory($parent) }
-    $script:MirrorLogPath = $LiteralPath
+    $script:LogPath = $Path
 }
 
-# -----------------------------------------------------------------------------
-# Quellinventur und Ermittlung des erwarteten SharePoint-Zielbilds
-# -----------------------------------------------------------------------------
-
 function Get-SourceInventory {
-    param([Parameter(Mandatory = $true)][string]$RootPath)
-
+    param([string]$RootPath)
     $root = New-Object IO.DirectoryInfo($RootPath)
     if (-not $root.Exists) { throw 'Der konfigurierte Quellordner ist nicht erreichbar.' }
-    if (($root.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
-        throw 'Der konfigurierte Quellordner darf kein Reparse Point sein.'
-    }
-    if (-not (Test-SafeSharePointSegment -Segment $root.Name)) {
-        throw 'Der Name des Quellordners kann nicht sicher nach SharePoint gespiegelt werden.'
-    }
+    if (($root.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw 'Der Quellordner darf kein Reparse Point sein.' }
+    if (-not (Test-SafeSharePointSegment $root.Name)) { throw 'Der Quellordnername kann nicht sicher nach SharePoint gespiegelt werden.' }
 
     $rootPrefix = $root.FullName.TrimEnd([char]92)
-    $pending = New-Object 'Collections.Generic.Stack[IO.DirectoryInfo]'
-    $pending.Push($root)
+    $stack = New-Object 'Collections.Generic.Stack[IO.DirectoryInfo]'
+    $stack.Push($root)
     $items = @()
     $targetOwners = @{}
 
-    # Der Stack bildet die Rekursion ohne feste Tiefengrenze ab. Jeder Ordner muss
-    # vollstaendig lesbar sein. Reparse Points (z. B. Junctions) brechen den Lauf ab,
-    # damit der Scan den freigegebenen Quellbaum nicht unbemerkt verlaesst.
-    while ($pending.Count -gt 0) {
-        $directory = $pending.Pop()
+    # Der Stack ersetzt Rekursion ohne Tiefenlimit. Jeder Reparse Point bricht ab,
+    # damit der Lauf den freigegebenen Quellbaum nicht verlaesst.
+    while ($stack.Count -gt 0) {
+        $directory = $stack.Pop()
         try {
             $files = @($directory.GetFiles() | Sort-Object Name)
-            $directories = @($directory.GetDirectories() | Sort-Object Name -Descending)
+            $dirs = @($directory.GetDirectories() | Sort-Object Name -Descending)
         }
         catch {
             throw 'Mindestens ein Quellordner konnte nicht vollstaendig gelesen werden.'
         }
 
-        foreach ($childDirectory in $directories) {
-            try { $attributes = $childDirectory.Attributes }
-            catch { throw 'Die Attribute eines Quellordners konnten nicht gelesen werden.' }
-            if (($attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
-                throw 'Ein Unterordner ist ein Reparse Point; der Spiegel-Lauf wurde sicher abgebrochen.'
-            }
-            $pending.Push($childDirectory)
+        foreach ($dir in $dirs) {
+            if (($dir.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw 'Ein Unterordner ist ein Reparse Point.' }
+            $stack.Push($dir)
         }
 
         foreach ($file in $files) {
             if ($file.Name.StartsWith('~$', [StringComparison]::OrdinalIgnoreCase)) { continue }
-            $isVisio = $false
-            foreach ($extension in $script:AllowedExtensions) {
-                if ([string]::Equals($file.Extension, $extension, [StringComparison]::OrdinalIgnoreCase)) {
-                    $isVisio = $true
-                    break
-                }
-            }
-            if (-not $isVisio) { continue }
+            if ($script:AllowedExtensions -notcontains $file.Extension.ToLowerInvariant()) { continue }
+            if (($file.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw 'Eine Visio-Datei ist ein Reparse Point.' }
 
-            try { $attributes = $file.Attributes }
-            catch { throw 'Die Attribute einer Visio-Datei konnten nicht gelesen werden.' }
-            if (($attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
-                throw 'Eine Visio-Datei ist ein Reparse Point; der Spiegel-Lauf wurde sicher abgebrochen.'
-            }
-
-            $relativeSourcePath = $file.FullName.Substring($rootPrefix.Length).TrimStart([char]92)
-            $sourceSegments = @($relativeSourcePath.Replace([char]92, [char]47).Split([char]47))
+            $sourceRel = $file.FullName.Substring($rootPrefix.Length).TrimStart([char]92)
+            $sourceSegments = @($sourceRel.Replace([char]92, [char]47).Split([char]47))
             foreach ($segment in $sourceSegments) {
-                if (-not (Test-SafeSharePointSegment -Segment $segment)) {
-                    throw 'Mindestens ein Visio-Pfad kann nicht sicher nach SharePoint gespiegelt werden.'
-                }
+                if (-not (Test-SafeSharePointSegment $segment)) { throw 'Mindestens ein Visio-Pfad ist fuer SharePoint nicht zulaessig.' }
             }
 
-            $baseName = [IO.Path]::GetFileNameWithoutExtension($file.Name)
-            if ([string]::IsNullOrWhiteSpace($baseName)) {
-                throw 'Eine Visio-Datei besitzt keinen gueltigen PDF-Basisnamen.'
-            }
-            $targetFileName = $baseName + '.pdf'
-            if (-not (Test-SafeSharePointSegment -Segment $targetFileName)) {
-                throw 'Mindestens ein erzeugter PDF-Dateiname ist in SharePoint nicht zulaessig.'
-            }
-            # Der Quellordnername ist absichtlich das erste Zielsegment. Nur fuer die
-            # Datei selbst wird die Visio-Endung durch .pdf ersetzt.
+            $pdfName = [IO.Path]::GetFileNameWithoutExtension($file.Name) + '.pdf'
+            if (-not (Test-SafeSharePointSegment $pdfName)) { throw 'Mindestens ein erzeugter PDF-Dateiname ist nicht zulaessig.' }
             $targetSegments = @($root.Name) + $sourceSegments
-            $targetSegments[$targetSegments.Count - 1] = $targetFileName
-            $targetRelativePath = $targetSegments -join '/'
-            $targetKey = Get-PathKey -Path $targetRelativePath
-            if ($targetOwners.ContainsKey($targetKey)) {
-                throw 'Mehrere Visio-Dateien wuerden denselben PDF-Zielpfad erzeugen.'
-            }
-            $targetOwners[$targetKey] = $relativeSourcePath
+            $targetSegments[$targetSegments.Count - 1] = $pdfName
+            $targetRel = $targetSegments -join '/'
+            $key = Get-PathKey $targetRel
+            if ($targetOwners.ContainsKey($key)) { throw 'Mehrere Visio-Dateien wuerden denselben PDF-Zielpfad erzeugen.' }
+            $targetOwners[$key] = $sourceRel
 
-            try {
-                $items += [pscustomobject][ordered]@{
-                    SourcePath             = $file.FullName
-                    SourceRelativePath     = $relativeSourcePath
-                    SourceLength           = [long]$file.Length
-                    SourceLastWriteUtcTicks = [long]$file.LastWriteTimeUtc.Ticks
-                    TargetRelativePath     = $targetRelativePath
-                }
-            }
-            catch {
-                throw 'Die Metadaten einer Visio-Datei konnten nicht gelesen werden.'
+            $items += [pscustomobject][ordered]@{
+                SourcePath              = $file.FullName
+                SourceRelativePath      = $sourceRel
+                SourceLength            = [long]$file.Length
+                SourceLastWriteUtcTicks = [long]$file.LastWriteTimeUtc.Ticks
+                TargetRelativePath      = $targetRel
             }
         }
     }
-
     return @($items | Sort-Object SourceRelativePath)
 }
 
-function Get-ExpectedFolders {
-    param([Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]]$Inventory)
+function New-PathSet {
+    param([AllowEmptyCollection()][string[]]$Paths)
+    $set = @{}
+    foreach ($path in $Paths) { $set[(Get-PathKey $path)] = $true }
+    return $set
+}
 
+function New-MirrorPlan {
+    param([AllowEmptyCollection()][object[]]$Inventory)
+    $files = New-PathSet -Paths @($Inventory | ForEach-Object { $_.TargetRelativePath })
     $folders = @{}
     foreach ($item in $Inventory) {
         $segments = @(([string]$item.TargetRelativePath).Split([char]47))
-        for ($count = 1; $count -lt $segments.Count; $count++) {
-            $relativeFolder = $segments[0..($count - 1)] -join '/'
-            $folderKey = Get-PathKey -Path $relativeFolder
-            if ($folders.ContainsKey($folderKey) -and
-                -not [string]::Equals([string]$folders[$folderKey], $relativeFolder, [StringComparison]::Ordinal)) {
-                throw 'Mehrere Quellordner wuerden auf denselben SharePoint-Zielordner abgebildet.'
-            }
-            $folders[$folderKey] = $relativeFolder
+        for ($i = 1; $i -lt $segments.Count; $i++) {
+            $folder = $segments[0..($i - 1)] -join '/'
+            $key = Get-PathKey $folder
+            if ($folders.ContainsKey($key) -and $folders[$key] -cne $folder) { throw 'Mehrere Quellordner wuerden denselben Zielordner erzeugen.' }
+            $folders[$key] = $folder
         }
     }
-    return @($folders.Values | Sort-Object @{ Expression = { @($_.Split([char]47)).Count } }, @{ Expression = { $_ } })
-}
-
-function Assert-NoFileFolderCollisions {
-    param(
-        [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]]$Inventory,
-        [Parameter(Mandatory = $true)][AllowEmptyCollection()][string[]]$ExpectedFolders
-    )
-
-    $folderKeys = @{}
-    foreach ($folder in $ExpectedFolders) { $folderKeys[(Get-PathKey -Path $folder)] = $true }
-    foreach ($item in $Inventory) {
-        if ($folderKeys.ContainsKey((Get-PathKey -Path ([string]$item.TargetRelativePath)))) {
-            throw 'Ein PDF-Zielpfad kollidiert mit einem benoetigten Zielordner.'
-        }
+    foreach ($key in $files.psbase.Keys) {
+        if ($folders.ContainsKey($key)) { throw 'Ein PDF-Zielpfad kollidiert mit einem Zielordner.' }
+    }
+    return [pscustomobject]@{
+        FileKeys   = $files
+        FolderKeys = $folders
+        Folders    = @($folders.psbase.Values | Sort-Object @{ Expression = { @($_.Split([char]47)).Count } }, @{ Expression = { $_ } })
     }
 }
 
-function Test-SameSourceInventory {
-    param(
-        [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]]$Expected,
-        [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]]$Actual
-    )
-
-    # Der Sicherheitsvergleich erkennt Aenderungen an Pfad, Dateigroesse oder Zeitstempel.
-    # Er ist kein inkrementeller State und entscheidet nicht, ob eine Datei hochgeladen wird.
+function Test-SameInventory {
+    param([AllowEmptyCollection()][object[]]$Expected, [AllowEmptyCollection()][object[]]$Actual)
     if ($Expected.Count -ne $Actual.Count) { return $false }
-    for ($index = 0; $index -lt $Expected.Count; $index++) {
-        if (-not [string]::Equals([string]$Expected[$index].SourceRelativePath, [string]$Actual[$index].SourceRelativePath, [StringComparison]::OrdinalIgnoreCase) -or
-            [long]$Expected[$index].SourceLength -ne [long]$Actual[$index].SourceLength -or
-            [long]$Expected[$index].SourceLastWriteUtcTicks -ne [long]$Actual[$index].SourceLastWriteUtcTicks) {
-            return $false
-        }
+    for ($i = 0; $i -lt $Expected.Count; $i++) {
+        if (-not [string]::Equals([string]$Expected[$i].SourceRelativePath, [string]$Actual[$i].SourceRelativePath, [StringComparison]::OrdinalIgnoreCase)) { return $false }
+        if ([long]$Expected[$i].SourceLength -ne [long]$Actual[$i].SourceLength) { return $false }
+        if ([long]$Expected[$i].SourceLastWriteUtcTicks -ne [long]$Actual[$i].SourceLastWriteUtcTicks) { return $false }
     }
     return $true
 }
 
-# -----------------------------------------------------------------------------
-# Lokale Visio-COM-Konvertierung
-# -----------------------------------------------------------------------------
-
-function Release-ComObject {
-    param([AllowNull()][object]$InputObject)
-
-    if ($null -ne $InputObject -and [Runtime.InteropServices.Marshal]::IsComObject($InputObject)) {
-        try { [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($InputObject) }
-        catch {}
-    }
+function Release-Com {
+    param([AllowNull()][object]$Object)
+    if ($null -ne $Object) { [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($Object) }
 }
 
 function Assert-ValidPdf {
-    param([Parameter(Mandatory = $true)][string]$LiteralPath)
-
-    if (-not [IO.File]::Exists($LiteralPath)) { throw 'Visio hat keine PDF-Datei erzeugt.' }
-    $stream = $null
+    param([string]$Path)
+    if (-not [IO.File]::Exists($Path) -or (Get-Item -LiteralPath $Path).Length -lt 5) { throw 'Eine PDF-Datei wurde nicht korrekt erzeugt.' }
+    $stream = [IO.File]::OpenRead($Path)
     try {
-        $stream = [IO.File]::OpenRead($LiteralPath)
-        if ($stream.Length -lt 5) { throw 'Die erzeugte PDF-Datei ist leer oder unvollstaendig.' }
-        $header = New-Object byte[] 5
-        if ($stream.Read($header, 0, 5) -ne 5 -or [Text.Encoding]::ASCII.GetString($header) -cne '%PDF-') {
-            throw 'Die erzeugte Datei besitzt keinen gueltigen PDF-Header.'
+        $bytes = New-Object byte[] 5
+        if ($stream.Read($bytes, 0, 5) -ne 5 -or [Text.Encoding]::ASCII.GetString($bytes) -ne '%PDF-') {
+            throw 'Eine erzeugte Datei ist keine gueltige PDF-Datei.'
         }
     }
     finally {
-        if ($null -ne $stream) { $stream.Dispose() }
+        $stream.Dispose()
     }
 }
 
-function Convert-InventoryToPdf {
-    param(
-        [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]]$Inventory,
-        [Parameter(Mandatory = $true)][string]$RunPath
-    )
+function Convert-ToPdf {
+    param([AllowEmptyCollection()][object[]]$Inventory, [string]$RunPath)
+    if ($Inventory.Count -eq 0) { return @() }
+    $workPath = Join-Path $RunPath 'work'
+    $pdfPath = Join-Path $RunPath 'pdf'
+    [void][IO.Directory]::CreateDirectory($workPath)
+    [void][IO.Directory]::CreateDirectory($pdfPath)
 
-    $visio = $documents = $null
+    $visio = $null
     $artifacts = @()
-    $quitFailure = $false
     try {
-        $visioType = [Type]::GetTypeFromProgID('Visio.InvisibleApp', $true)
-        $visio = [Activator]::CreateInstance($visioType)
+        try { $visio = New-Object -ComObject Visio.Application }
+        catch { throw 'Microsoft Visio konnte nicht als COM-Anwendung gestartet werden.' }
+        $visio.Visible = $false
         $visio.AlertResponse = 7
-        $visio.EventsEnabled = $false
-        $visio.ShowChanges = $false
-        $visio.ShowProgress = $false
-        $documents = $visio.Documents
 
-        # Visio-Konstanten als Zahlen, damit keine Office-Interop-Assembly benoetigt wird:
-        # schreibgeschuetzt, kein MRU-Eintrag, unsichtbar, Makros deaktiviert,
-        # kein Arbeitsbereich und keine Aufforderung zur Aktualisierung externer Daten.
-        $openFlags = [int16](2 -bor 8 -bor 64 -bor 128 -bor 256 -bor 1024)
-        for ($index = 0; $index -lt $Inventory.Count; $index++) {
-            $item = $Inventory[$index]
-            $document = $recordsets = $null
+        foreach ($item in $Inventory) {
+            $copyPath = Join-Path $workPath ([guid]::NewGuid().ToString('N') + [IO.Path]::GetExtension([string]$item.SourcePath))
+            $outPath = Join-Path $pdfPath ([guid]::NewGuid().ToString('N') + '.pdf')
+            [IO.File]::Copy([string]$item.SourcePath, $copyPath, $false)
+
+            $document = $null
             try {
-                $stagedSource = Join-Path $RunPath (('{0:D6}{1}' -f $index, [IO.Path]::GetExtension([string]$item.SourcePath)))
-                $pdfPath = Join-Path $RunPath (('{0:D6}.pdf' -f $index))
-                [IO.File]::Copy([string]$item.SourcePath, $stagedSource, $false)
-                $document = $documents.OpenEx([IO.Path]::GetFullPath($stagedSource), $openFlags)
-                if ([bool]$visio.DataFeaturesEnabled) {
-                    $recordsets = $document.DataRecordsets
-                    for ($recordsetIndex = 1; $recordsetIndex -le [int]$recordsets.Count; $recordsetIndex++) {
-                        $recordset = $null
-                        try {
-                            $recordset = $recordsets.Item($recordsetIndex)
-                            $recordset.RefreshInterval = 0
-                        }
-                        finally {
-                            Release-ComObject $recordset
-                            $recordset = $null
-                        }
-                    }
-                }
-                # ExportAsFixedFormat verwendet hier die Visio-Zahlenkonstanten:
-                # PDF, Druckqualitaet, alle Vordergrundseiten, keine Hintergrundseiten,
-                # Dokumenteigenschaften/Strukturtags einbeziehen und kein PDF/A.
-                [void]$document.ExportAsFixedFormat(
-                    1, [IO.Path]::GetFullPath($pdfPath), 1, 0,
-                    1, -1, $false, $false, $true, $true, $false
-                )
-                Assert-ValidPdf -LiteralPath $pdfPath
-                $artifacts += [pscustomobject][ordered]@{
-                    TargetRelativePath = [string]$item.TargetRelativePath
-                    PdfPath            = $pdfPath
-                }
+                # Read-only, keine Dateiliste, verborgen, Makros aus, kein Workspace.
+                $document = $visio.Documents.OpenEx($copyPath, (2 -bor 8 -bor 64 -bor 128 -bor 256))
+                # PDF, Druckqualitaet, alle Vordergrundseiten; Visio-Defaults inkl. Hintergrund.
+                $document.ExportAsFixedFormat(1, $outPath, 1, 0)
             }
             catch {
-                throw ("Die Visio-Konvertierung ist fehlgeschlagen: {0}. Ursache: {1}" -f $item.SourceRelativePath, $_.Exception.Message)
+                throw ("Visio-Datei konnte nicht konvertiert werden: {0}" -f [string]$item.SourceRelativePath)
             }
             finally {
-                Release-ComObject $recordsets
-                $recordsets = $null
                 if ($null -ne $document) {
-                    try {
-                        $document.Saved = $true
-                        [void]$document.Close()
-                    }
-                    finally {
-                        Release-ComObject $document
-                        $document = $null
-                    }
+                    try { $document.Close() } catch {}
+                    Release-Com $document
                 }
             }
+            Assert-ValidPdf $outPath
+            $artifacts += [pscustomobject][ordered]@{ TargetRelativePath = [string]$item.TargetRelativePath; PdfPath = $outPath }
         }
     }
     finally {
-        Release-ComObject $documents
-        $documents = $null
         if ($null -ne $visio) {
-            try { [void]$visio.Quit() }
-            catch {
-                $quitFailure = $true
-                try { Write-MirrorLog -Level ERROR -Message 'Die Visio-Instanz konnte nicht sauber beendet werden.' }
-                catch {}
-            }
-            finally {
-                Release-ComObject $visio
-                $visio = $null
-            }
+            try { $visio.Quit() } catch {}
+            Release-Com $visio
         }
         [GC]::Collect()
         [GC]::WaitForPendingFinalizers()
-        [GC]::Collect()
-        [GC]::WaitForPendingFinalizers()
     }
-    if ($quitFailure) { throw 'Die Visio-Instanz konnte nicht sauber beendet werden.' }
     return @($artifacts)
 }
 
-# -----------------------------------------------------------------------------
-# SharePoint-REST-Zugriffe mit der aktuellen Windows-Identitaet
-# -----------------------------------------------------------------------------
-
-# Jeder REST-Aufruf verwendet -UseDefaultCredentials. Es gibt deshalb absichtlich
-# keine Kennwort-, Token- oder Anmeldeinformationsfelder in Skript und Konfiguration.
-
-function Get-HttpStatusCode {
-    param([Parameter(Mandatory = $true)][object]$ErrorRecord)
-
-    try {
-        if ($null -ne $ErrorRecord.Exception.Response) {
-            return [int]$ErrorRecord.Exception.Response.StatusCode
-        }
+function Get-HttpStatus {
+    param([Management.Automation.ErrorRecord]$ErrorRecord)
+    if ((Has-Property $ErrorRecord.Exception 'Response') -and
+        (Has-Property $ErrorRecord.Exception.Response 'StatusCode')) {
+        return [int]$ErrorRecord.Exception.Response.StatusCode
     }
-    catch {}
     return $null
 }
 
-function Invoke-SpGet {
+function Invoke-SpRequest {
     param(
-        [Parameter(Mandatory = $true)][string]$Uri,
-        [switch]$AllowNotFound
+        [string]$Uri, [ValidateSet('Get', 'Post')][string]$Method = 'Get',
+        [string]$SiteUrl, [AllowNull()][object]$Body,
+        [string]$ContentType = 'application/json;odata=verbose', [switch]$AllowNotFound
     )
-
+    $request = @{
+        Method = $Method; Uri = $Uri; Headers = $script:SpHeaders.Clone()
+        UseDefaultCredentials = $true; TimeoutSec = $script:SpTimeoutSeconds
+    }
     try {
-        return Invoke-RestMethod -Method Get -Uri $Uri -Headers $script:SharePointHeaders -UseDefaultCredentials -TimeoutSec $script:SharePointTimeoutSeconds -ErrorAction Stop
+        # contextinfo selbst braucht keinen Digest. Schreibaufrufe geben SiteUrl an.
+        if ($Method -eq 'Post' -and $SiteUrl) { $request.Headers['X-RequestDigest'] = Get-SpDigest $SiteUrl }
+        if ($null -ne $Body) { $request.Body = $Body; $request.ContentType = $ContentType }
+        return Invoke-RestMethod @request
     }
     catch {
-        $status = Get-HttpStatusCode -ErrorRecord $_
-        if ($AllowNotFound -and $status -eq 404) { return $null }
-        $label = if ($null -eq $status) { 'unbekannt' } else { [string]$status }
-        throw "SharePoint-REST-Lesezugriff fehlgeschlagen (HTTP $label)."
+        if ($Method -eq 'Get' -and $AllowNotFound -and (Get-HttpStatus $_) -eq 404) { return $null }
+        # Urspruengliche HTTP-/Verbindungsursache fuer die Diagnose erhalten.
+        throw
     }
 }
 
 function Get-SpDigest {
-    param([Parameter(Mandatory = $true)][string]$SiteUrl)
-
-    try {
-        $response = Invoke-RestMethod -Method Post -Uri ($SiteUrl + '/_api/contextinfo') -Headers $script:SharePointHeaders -UseDefaultCredentials -TimeoutSec $script:SharePointTimeoutSeconds -ContentType 'application/json;odata=verbose;charset=utf-8' -ErrorAction Stop
-        $digest = [string]$response.d.GetContextWebInformation.FormDigestValue
-        if ([string]::IsNullOrWhiteSpace($digest)) { throw 'empty' }
-        return $digest
-    }
-    catch {
-        $status = Get-HttpStatusCode -ErrorRecord $_
-        $label = if ($null -eq $status) { 'unbekannt' } else { [string]$status }
-        throw "SharePoint lieferte keinen Request-Digest (HTTP $label)."
-    }
+    param([string]$SiteUrl)
+    $response = Invoke-SpRequest -Method Post -Uri (New-AbsoluteUri ($SiteUrl + '/_api/contextinfo'))
+    return [string]$response.d.GetContextWebInformation.FormDigestValue
 }
 
-function New-SpMutationHeaders {
-    param([Parameter(Mandatory = $true)][string]$SiteUrl)
-
-    return @{
-        Accept                         = 'application/json;odata=verbose'
-        'X-FORMS_BASED_AUTH_ACCEPTED' = 'f'
-        'X-RequestDigest'              = (Get-SpDigest -SiteUrl $SiteUrl)
-    }
-}
-
-function Invoke-SpJsonPost {
-    param(
-        [Parameter(Mandatory = $true)][string]$SiteUrl,
-        [Parameter(Mandatory = $true)][string]$Uri,
-        [Parameter(Mandatory = $true)][object]$Body
-    )
-
-    try {
-        $json = $Body | ConvertTo-Json -Depth 6 -Compress
-        $jsonBytes = $script:MirrorUtf8NoBom.GetBytes($json)
-        return Invoke-RestMethod -Method Post -Uri $Uri -Headers (New-SpMutationHeaders -SiteUrl $SiteUrl) -UseDefaultCredentials -TimeoutSec $script:SharePointTimeoutSeconds -ContentType 'application/json;odata=verbose;charset=utf-8' -Body $jsonBytes -ErrorAction Stop
-    }
-    catch {
-        $status = Get-HttpStatusCode -ErrorRecord $_
-        $label = if ($null -eq $status) { 'unbekannt' } else { [string]$status }
-        throw "SharePoint-REST-Schreibzugriff fehlgeschlagen (HTTP $label)."
-    }
-}
-
-function Invoke-SpFilePost {
-    param(
-        [Parameter(Mandatory = $true)][string]$SiteUrl,
-        [Parameter(Mandatory = $true)][string]$Uri,
-        [Parameter(Mandatory = $true)][string]$LiteralPath
-    )
-
-    try {
-        return Invoke-RestMethod -Method Post -Uri $Uri -Headers (New-SpMutationHeaders -SiteUrl $SiteUrl) -UseDefaultCredentials -TimeoutSec $script:SharePointTimeoutSeconds -ContentType 'application/pdf' -InFile $LiteralPath -ErrorAction Stop
-    }
-    catch {
-        $status = Get-HttpStatusCode -ErrorRecord $_
-        $label = if ($null -eq $status) { 'unbekannt' } else { [string]$status }
-        throw "Der PDF-Upload nach SharePoint ist fehlgeschlagen (HTTP $label)."
-    }
-}
-
-function Invoke-SpActionPost {
-    param(
-        [Parameter(Mandatory = $true)][string]$SiteUrl,
-        [Parameter(Mandatory = $true)][string]$Uri
-    )
-
-    try {
-        return Invoke-RestMethod -Method Post -Uri $Uri -Headers (New-SpMutationHeaders -SiteUrl $SiteUrl) -UseDefaultCredentials -TimeoutSec $script:SharePointTimeoutSeconds -ContentType 'application/json;odata=verbose;charset=utf-8' -ErrorAction Stop
-    }
-    catch {
-        $status = Get-HttpStatusCode -ErrorRecord $_
-        $label = if ($null -eq $status) { 'unbekannt' } else { [string]$status }
-        throw "Die SharePoint-Papierkorbaktion ist fehlgeschlagen (HTTP $label)."
-    }
-}
-
-function Get-SpFolderMetadata {
-    param(
-        [Parameter(Mandatory = $true)][string]$SiteUrl,
-        [Parameter(Mandatory = $true)][string]$ServerRelativeUrl,
-        [switch]$AllowNotFound
-    )
-
-    $literal = ConvertTo-ODataLiteral -Value $ServerRelativeUrl
-    $uri = New-AbsoluteUriText -Text ($SiteUrl + "/_api/web/GetFolderByServerRelativeUrl('$literal')?`$select=UniqueId,ServerRelativeUrl")
-    $response = Invoke-SpGet -Uri $uri -AllowNotFound:$AllowNotFound
-    if ($null -eq $response) { return $null }
-    return $response.d
+function Get-SpFolder {
+    param([string]$SiteUrl, [string]$ServerRelativeUrl, [switch]$AllowNotFound)
+    $literal = ConvertTo-ODataLiteral $ServerRelativeUrl
+    $uri = New-AbsoluteUri ($SiteUrl + "/_api/web/GetFolderByServerRelativeUrl('$literal')?`$select=Name,ServerRelativeUrl,UniqueId")
+    return Invoke-SpRequest -Uri $uri -AllowNotFound:$AllowNotFound
 }
 
 function Get-SpContext {
-    param([Parameter(Mandatory = $true)][object]$Configuration)
+    param([object]$Config)
+    $libraryLiteral = ConvertTo-ODataLiteral ([string]$Config.LibraryName)
+    $uri = New-AbsoluteUri ($Config.SharePointSiteUrl + "/_api/web/lists/getbytitle('$libraryLiteral')?`$select=ForceCheckout,RootFolder/ServerRelativeUrl&`$expand=RootFolder")
+    $library = Invoke-SpRequest $uri
+    if ($library.d.ForceCheckout -eq $true) { throw 'Die Zielbibliothek verlangt Auschecken; das Skript setzt ForceCheckout=false voraus.' }
 
-    $libraryLiteral = ConvertTo-ODataLiteral -Value ([string]$Configuration.LibraryName)
-    $libraryUri = New-AbsoluteUriText -Text ($Configuration.SharePointSiteUrl + "/_api/web/lists/getbytitle('$libraryLiteral')?`$select=ForceCheckout,RootFolder/ServerRelativeUrl,RootFolder/UniqueId&`$expand=RootFolder")
-    $libraryResponse = Invoke-SpGet -Uri $libraryUri
-    if ($libraryResponse.d.ForceCheckout -eq $true) {
-        throw 'Die Zielbibliothek verlangt Auschecken; der Minimalbetrieb setzt ForceCheckout=false voraus.'
+    $libraryRoot = [string]$library.d.RootFolder.ServerRelativeUrl
+    if ([string]::IsNullOrWhiteSpace($libraryRoot)) { throw 'SharePoint lieferte keinen Bibliothekswurzelpfad.' }
+    $context = [pscustomobject][ordered]@{
+        SiteUrl       = [string]$Config.SharePointSiteUrl
+        TargetRootUrl = Join-SpUrl $libraryRoot ([string]$Config.TargetFolderPath)
+        TargetRootId  = [guid]$Config.TargetFolderUniqueId
     }
-    $libraryRootUrl = [string]$libraryResponse.d.RootFolder.ServerRelativeUrl
-    if ([string]::IsNullOrWhiteSpace($libraryRootUrl)) { throw 'SharePoint lieferte keinen Bibliothekswurzelpfad.' }
+    Assert-SpTarget $context
+    return $context
+}
 
-    $targetRootUrl = Join-ServerRelativeUrl -Base $libraryRootUrl -Child ([string]$Configuration.TargetFolderPath)
-    $target = Get-SpFolderMetadata -SiteUrl $Configuration.SharePointSiteUrl -ServerRelativeUrl $targetRootUrl
+function Assert-SpTarget {
+    param([object]$Context)
+    # Vor kritischen Schreib-/Recycle-Aktionen erneut pruefen: Pfad und GUID muessen
+    # noch auf denselben dedizierten Zielordner zeigen.
+    $folder = Get-SpFolder -SiteUrl $Context.SiteUrl -ServerRelativeUrl $Context.TargetRootUrl
     $actualId = [guid]::Empty
-    if ($null -eq $target -or -not [guid]::TryParse([string]$target.UniqueId, [ref]$actualId) -or
-        $actualId -ne [guid]$Configuration.TargetFolderUniqueId -or
-        -not [string]::Equals([string]$target.ServerRelativeUrl, $targetRootUrl, [StringComparison]::OrdinalIgnoreCase)) {
+    if ($null -eq $folder -or -not [guid]::TryParse([string]$folder.d.UniqueId, [ref]$actualId) -or
+        $actualId -ne [guid]$Context.TargetRootId -or
+        -not [string]::Equals([string]$folder.d.ServerRelativeUrl, [string]$Context.TargetRootUrl, [StringComparison]::OrdinalIgnoreCase)) {
         throw 'Der SharePoint-Zielordner stimmt nicht mit Pfad und TargetFolderUniqueId ueberein.'
     }
-    return [pscustomobject][ordered]@{
-        SiteUrl       = [string]$Configuration.SharePointSiteUrl
-        TargetRootUrl = $targetRootUrl
-        TargetRootId  = $actualId
-    }
 }
 
-function Assert-SharePointPathLengths {
-    param(
-        [Parameter(Mandatory = $true)][object]$Context,
-        [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]]$Inventory,
-        [Parameter(Mandatory = $true)][AllowEmptyCollection()][string[]]$ExpectedFolders
-    )
-
-    if (([string]$Context.TargetRootUrl).Length -gt 260) {
-        throw 'Der SharePoint-Zielordnerpfad ueberschreitet 260 Zeichen.'
-    }
-    foreach ($folder in $ExpectedFolders) {
-        if ((Join-ServerRelativeUrl -Base $Context.TargetRootUrl -Child $folder).Length -gt 260) {
-            throw 'Mindestens ein SharePoint-Zielordnerpfad ueberschreitet 260 Zeichen.'
-        }
+function Assert-SpPathLengths {
+    param([object]$Context, [AllowEmptyCollection()][object[]]$Inventory, [AllowEmptyCollection()][string[]]$Folders)
+    if (([string]$Context.TargetRootUrl).Length -gt 260) { throw 'Der SharePoint-Zielordnerpfad ueberschreitet 260 Zeichen.' }
+    foreach ($folder in $Folders) {
+        if ((Join-SpUrl $Context.TargetRootUrl $folder).Length -gt 260) { throw 'Mindestens ein SharePoint-Zielordnerpfad ueberschreitet 260 Zeichen.' }
     }
     foreach ($item in $Inventory) {
-        if ((Join-ServerRelativeUrl -Base $Context.TargetRootUrl -Child ([string]$item.TargetRelativePath)).Length -gt 260) {
-            throw 'Mindestens ein SharePoint-PDF-Zielpfad ueberschreitet 260 Zeichen.'
-        }
-    }
-}
-
-function Assert-SpTargetIdentity {
-    param(
-        [Parameter(Mandatory = $true)][object]$Context,
-        [Parameter(Mandatory = $true)][guid]$ExpectedId
-    )
-
-    # Diese Nur-Lese-Pruefung wird bewusst unmittelbar vor kritischen Schreib- und
-    # Papierkorbaktionen wiederholt. Ein verschobener, ersetzter oder falsch
-    # konfigurierter Zielordner stoppt den Lauf, bevor die naechste Aktion erfolgt.
-    $folder = Get-SpFolderMetadata -SiteUrl $Context.SiteUrl -ServerRelativeUrl $Context.TargetRootUrl
-    $actualId = [guid]::Empty
-    if ($null -eq $folder -or
-        -not [guid]::TryParse([string]$folder.UniqueId, [ref]$actualId) -or
-        $actualId -ne $ExpectedId -or
-        -not [string]::Equals([string]$folder.ServerRelativeUrl, [string]$Context.TargetRootUrl, [StringComparison]::OrdinalIgnoreCase)) {
-        throw 'Die SharePoint-Zielidentitaet hat sich waehrend des Laufs geaendert.'
+        if ((Join-SpUrl $Context.TargetRootUrl ([string]$item.TargetRelativePath)).Length -gt 260) { throw 'Mindestens ein SharePoint-PDF-Zielpfad ueberschreitet 260 Zeichen.' }
     }
 }
 
 function Ensure-SpFolders {
-    param(
-        [Parameter(Mandatory = $true)][object]$Context,
-        [Parameter(Mandatory = $true)][AllowEmptyCollection()][string[]]$RelativeFolders
-    )
-
-    foreach ($relativeFolder in $RelativeFolders) {
-        $serverRelativeUrl = Join-ServerRelativeUrl -Base $Context.TargetRootUrl -Child $relativeFolder
-        if ($null -ne (Get-SpFolderMetadata -SiteUrl $Context.SiteUrl -ServerRelativeUrl $serverRelativeUrl -AllowNotFound)) { continue }
-        Assert-SpTargetIdentity -Context $Context -ExpectedId $Context.TargetRootId
-        $body = [ordered]@{
-            '__metadata'     = [ordered]@{ type = 'SP.Folder' }
-            ServerRelativeUrl = $serverRelativeUrl
-        }
-        [void](Invoke-SpJsonPost -SiteUrl $Context.SiteUrl -Uri ($Context.SiteUrl + '/_api/web/folders') -Body $body)
-        if ($null -eq (Get-SpFolderMetadata -SiteUrl $Context.SiteUrl -ServerRelativeUrl $serverRelativeUrl -AllowNotFound)) {
-            throw 'Ein SharePoint-Zielordner wurde nach der Anlage nicht gefunden.'
-        }
+    param([object]$Context, [AllowEmptyCollection()][string[]]$Folders)
+    foreach ($folder in $Folders) {
+        $serverUrl = Join-SpUrl $Context.TargetRootUrl $folder
+        if ($null -ne (Get-SpFolder -SiteUrl $Context.SiteUrl -ServerRelativeUrl $serverUrl -AllowNotFound)) { continue }
+        Assert-SpTarget $Context
+        $body = ([ordered]@{ '__metadata' = [ordered]@{ type = 'SP.Folder' }; ServerRelativeUrl = $serverUrl } | ConvertTo-Json -Depth 4)
+        [void](Invoke-SpRequest -Method Post -SiteUrl $Context.SiteUrl -Uri ($Context.SiteUrl + '/_api/web/folders') -Body $body)
+        if ($null -eq (Get-SpFolder -SiteUrl $Context.SiteUrl -ServerRelativeUrl $serverUrl -AllowNotFound)) { throw 'Ein SharePoint-Zielordner wurde nach der Anlage nicht gefunden.' }
     }
 }
 
 function Send-SpPdfs {
-    param(
-        [Parameter(Mandatory = $true)][object]$Context,
-        [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]]$Artifacts
-    )
-
+    param([object]$Context, [AllowEmptyCollection()][object[]]$Artifacts)
     foreach ($artifact in $Artifacts) {
         $segments = @(([string]$artifact.TargetRelativePath).Split([char]47))
         $fileName = $segments[$segments.Count - 1]
-        $relativeParent = if ($segments.Count -gt 1) { $segments[0..($segments.Count - 2)] -join '/' } else { '' }
-        $parentUrl = Join-ServerRelativeUrl -Base $Context.TargetRootUrl -Child $relativeParent
-        $parentLiteral = ConvertTo-ODataLiteral -Value $parentUrl
-        $fileLiteral = ConvertTo-ODataLiteral -Value $fileName
-        $uri = New-AbsoluteUriText -Text ($Context.SiteUrl + "/_api/web/GetFolderByServerRelativeUrl('$parentLiteral')/Files/add(url='$fileLiteral',overwrite=true)")
-        Assert-SpTargetIdentity -Context $Context -ExpectedId $Context.TargetRootId
-        [void](Invoke-SpFilePost -SiteUrl $Context.SiteUrl -Uri $uri -LiteralPath ([string]$artifact.PdfPath))
+        $parentRel = if ($segments.Count -gt 1) { $segments[0..($segments.Count - 2)] -join '/' } else { '' }
+        $parentUrl = Join-SpUrl $Context.TargetRootUrl $parentRel
+        $uri = New-AbsoluteUri ($Context.SiteUrl + "/_api/web/GetFolderByServerRelativeUrl('$(ConvertTo-ODataLiteral $parentUrl)')/Files/add(url='$(ConvertTo-ODataLiteral $fileName)',overwrite=true)")
+        Assert-SpTarget $Context
+        [void](Invoke-SpRequest -Method Post -SiteUrl $Context.SiteUrl -Uri $uri -Body ([IO.File]::ReadAllBytes([string]$artifact.PdfPath)) -ContentType 'application/octet-stream')
     }
 }
 
 function Assert-SpApiUri {
-    param(
-        [Parameter(Mandatory = $true)][string]$SiteUrl,
-        [Parameter(Mandatory = $true)][string]$Uri
-    )
-
+    param([string]$SiteUrl, [string]$Uri)
     $site = [uri]$SiteUrl
     $candidate = [uri]$Uri
     if ($candidate.Scheme -cne 'https' -or
@@ -822,240 +485,170 @@ function Assert-SpApiUri {
     }
 }
 
-function Get-SpPagedItems {
-    param(
-        [Parameter(Mandatory = $true)][string]$SiteUrl,
-        [Parameter(Mandatory = $true)][string]$InitialUri
-    )
-
+function Get-SpPages {
+    param([string]$SiteUrl, [string]$InitialUri)
     $items = @()
     $next = $InitialUri
     while (-not [string]::IsNullOrWhiteSpace($next)) {
         Assert-SpApiUri -SiteUrl $SiteUrl -Uri $next
-        $response = Invoke-SpGet -Uri $next
+        $response = Invoke-SpRequest $next
         $page = @($response.d.results)
         $items += $page
-        $next = if (Test-ObjectProperty -InputObject $response.d -Name '__next') { [string]$response.d.__next } else { $null }
-        if ([string]::IsNullOrWhiteSpace($next) -and $page.Count -ge 5000) {
-            throw 'SharePoint lieferte eine moeglicherweise abgeschnittene 5000er-Inventurseite ohne Fortsetzungslink.'
-        }
+        $next = if (Has-Property $response.d '__next') { [string]$response.d.__next } else { $null }
+        if ([string]::IsNullOrWhiteSpace($next) -and $page.Count -ge 5000) { throw 'SharePoint lieferte eine abgeschnittene Inventurseite ohne Fortsetzungslink.' }
     }
     return @($items)
 }
 
 function Get-SpTargetInventory {
-    param([Parameter(Mandatory = $true)][object]$Context)
-
+    param([object]$Context)
     $files = @()
     $folders = @()
-    $pending = New-Object 'Collections.Generic.Stack[object]'
-    $pending.Push([pscustomobject]@{ ServerRelativeUrl = $Context.TargetRootUrl; RelativePath = '' })
+    $stack = New-Object 'Collections.Generic.Stack[object]'
+    $stack.Push([pscustomobject]@{ ServerRelativeUrl = $Context.TargetRootUrl; RelativePath = '' })
 
-    while ($pending.Count -gt 0) {
-        $current = $pending.Pop()
-        $folderLiteral = ConvertTo-ODataLiteral -Value ([string]$current.ServerRelativeUrl)
-        $filesUri = New-AbsoluteUriText -Text ($Context.SiteUrl + "/_api/web/GetFolderByServerRelativeUrl('$folderLiteral')/Files?`$select=Name,ServerRelativeUrl,UniqueId&`$top=5000")
-        foreach ($file in @(Get-SpPagedItems -SiteUrl $Context.SiteUrl -InitialUri $filesUri)) {
-            $relativePath = if ([string]::IsNullOrWhiteSpace([string]$current.RelativePath)) { [string]$file.Name } else { [string]$current.RelativePath + '/' + [string]$file.Name }
-            $files += [pscustomobject]@{ RelativePath = $relativePath; ServerRelativeUrl = [string]$file.ServerRelativeUrl }
+    while ($stack.Count -gt 0) {
+        $current = $stack.Pop()
+        $literal = ConvertTo-ODataLiteral ([string]$current.ServerRelativeUrl)
+        $fileUri = New-AbsoluteUri ($Context.SiteUrl + "/_api/web/GetFolderByServerRelativeUrl('$literal')/Files?`$select=Name,ServerRelativeUrl&`$top=5000")
+        foreach ($file in @(Get-SpPages -SiteUrl $Context.SiteUrl -InitialUri $fileUri)) {
+            $rel = if ([string]::IsNullOrWhiteSpace([string]$current.RelativePath)) { [string]$file.Name } else { [string]$current.RelativePath + '/' + [string]$file.Name }
+            $files += [pscustomobject]@{ RelativePath = $rel; ServerRelativeUrl = [string]$file.ServerRelativeUrl }
         }
 
-        $foldersUri = New-AbsoluteUriText -Text ($Context.SiteUrl + "/_api/web/GetFolderByServerRelativeUrl('$folderLiteral')/Folders?`$select=Name,ServerRelativeUrl,UniqueId&`$top=5000")
-        foreach ($folder in @(Get-SpPagedItems -SiteUrl $Context.SiteUrl -InitialUri $foldersUri)) {
-            $relativePath = if ([string]::IsNullOrWhiteSpace([string]$current.RelativePath)) { [string]$folder.Name } else { [string]$current.RelativePath + '/' + [string]$folder.Name }
-            $folders += [pscustomobject]@{ RelativePath = $relativePath; ServerRelativeUrl = [string]$folder.ServerRelativeUrl }
-            $pending.Push([pscustomobject]@{ ServerRelativeUrl = [string]$folder.ServerRelativeUrl; RelativePath = $relativePath })
+        $folderUri = New-AbsoluteUri ($Context.SiteUrl + "/_api/web/GetFolderByServerRelativeUrl('$literal')/Folders?`$select=Name,ServerRelativeUrl&`$top=5000")
+        foreach ($folder in @(Get-SpPages -SiteUrl $Context.SiteUrl -InitialUri $folderUri)) {
+            $rel = if ([string]::IsNullOrWhiteSpace([string]$current.RelativePath)) { [string]$folder.Name } else { [string]$current.RelativePath + '/' + [string]$folder.Name }
+            $folders += [pscustomobject]@{ RelativePath = $rel; ServerRelativeUrl = [string]$folder.ServerRelativeUrl }
+            $stack.Push([pscustomobject]@{ ServerRelativeUrl = [string]$folder.ServerRelativeUrl; RelativePath = $rel })
         }
     }
-
     return [pscustomobject][ordered]@{ Files = @($files); Folders = @($folders) }
 }
 
-# -----------------------------------------------------------------------------
-# Sicherheitspruefung der Zielinventur und exakter Spiegelabgleich
-# -----------------------------------------------------------------------------
-
 function Assert-SpRemoteInventory {
-    param(
-        [Parameter(Mandatory = $true)][object]$Context,
-        [Parameter(Mandatory = $true)][object]$RemoteInventory,
-        [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]]$SourceInventory,
-        [Parameter(Mandatory = $true)][AllowEmptyCollection()][string[]]$ExpectedFolders
-    )
-
+    param([object]$Context, [object]$Remote, [object]$Plan)
     $rootPrefix = ([string]$Context.TargetRootUrl).TrimEnd([char]47) + '/'
-    foreach ($remoteItem in @($RemoteInventory.Files) + @($RemoteInventory.Folders)) {
+    foreach ($remoteItem in @($Remote.Files) + @($Remote.Folders)) {
         $serverPath = [string]$remoteItem.ServerRelativeUrl
         if (-not $serverPath.StartsWith($rootPrefix, [StringComparison]::OrdinalIgnoreCase) -or $serverPath.Length -gt 260) {
-            throw 'Die SharePoint-Inventur enthielt einen Pfad ausserhalb des freigegebenen Zielordners.'
+            throw 'Die SharePoint-Inventur enthielt einen Pfad ausserhalb des Zielordners.'
         }
-        foreach ($segment in @(([string]$remoteItem.RelativePath).Split([char]47))) {
-            if (-not (Test-SafeSharePointSegment -Segment $segment)) {
-                throw 'Die SharePoint-Inventur enthaelt einen nicht sicher adressierbaren Namen.'
-            }
-        }
+        Assert-SafeRelativePath ([string]$remoteItem.RelativePath) 'Die SharePoint-Inventur enthaelt einen nicht sicher adressierbaren Namen.'
     }
 
-    $remoteFileKeys = @{}
-    foreach ($file in @($RemoteInventory.Files)) { $remoteFileKeys[(Get-PathKey -Path ([string]$file.RelativePath))] = $true }
-    foreach ($item in $SourceInventory) {
-        if (-not $remoteFileKeys.ContainsKey((Get-PathKey -Path ([string]$item.TargetRelativePath)))) {
-            throw 'Nach dem Upload fehlt mindestens eine erwartete PDF-Datei in SharePoint.'
-        }
+    $remoteFiles = New-PathSet -Paths @($Remote.Files | ForEach-Object { $_.RelativePath })
+    foreach ($key in $Plan.FileKeys.psbase.Keys) {
+        if (-not $remoteFiles.ContainsKey($key)) { throw 'Nach dem Upload fehlt mindestens eine erwartete PDF-Datei.' }
     }
 
-    $remoteFolderKeys = @{}
-    foreach ($folder in @($RemoteInventory.Folders)) { $remoteFolderKeys[(Get-PathKey -Path ([string]$folder.RelativePath))] = $true }
-    foreach ($expectedFolder in $ExpectedFolders) {
-        if (-not $remoteFolderKeys.ContainsKey((Get-PathKey -Path $expectedFolder))) {
-            throw 'Nach dem Upload fehlt mindestens ein erwarteter Zielordner in SharePoint.'
-        }
+    $remoteFolders = New-PathSet -Paths @($Remote.Folders | ForEach-Object { $_.RelativePath })
+    foreach ($key in $Plan.FolderKeys.psbase.Keys) {
+        if (-not $remoteFolders.ContainsKey($key)) { throw 'Nach dem Upload fehlt mindestens ein erwarteter Zielordner.' }
     }
 }
 
 function Invoke-SpRecycleExtras {
-    param(
-        [Parameter(Mandatory = $true)][object]$Context,
-        [Parameter(Mandatory = $true)][object]$RemoteInventory,
-        [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]]$SourceInventory,
-        [Parameter(Mandatory = $true)][AllowEmptyCollection()][string[]]$ExpectedFolders
-    )
+    param([object]$Context, [object]$Remote, [object]$Plan)
 
-    $expectedFiles = @{}
-    foreach ($item in $SourceInventory) { $expectedFiles[(Get-PathKey -Path ([string]$item.TargetRelativePath))] = $true }
-    $expectedFolderKeys = @{}
-    foreach ($folder in $ExpectedFolders) { $expectedFolderKeys[(Get-PathKey -Path $folder)] = $true }
-
-    # ACHTUNG: Auch manuell abgelegte Fremdinhalte gelten als ueberzaehlig. Bei leerer
-    # Quelle sind beide Erwartungslisten leer und alle Inhalte unterhalb des dedizierten
-    # Zielordners werden erfasst. Der Zielordner selbst ist nie Teil dieser Inventur
-    # und kann deshalb hier nicht recycelt werden.
-    $extraFiles = @($RemoteInventory.Files | Where-Object { -not $expectedFiles.ContainsKey((Get-PathKey -Path ([string]$_.RelativePath))) } |
+    # Dedizierter Zielordner: Fremdinhalte und bei leerer Quelle alle Inhalte darunter
+    # werden recycelt. Der Zielordner selbst ist nicht Teil dieser Inventur.
+    $extraFiles = @($Remote.Files | Where-Object { -not $Plan.FileKeys.ContainsKey((Get-PathKey ([string]$_.RelativePath))) } |
         Sort-Object @{ Expression = { @(([string]$_.RelativePath).Split([char]47)).Count }; Descending = $true }, RelativePath)
     foreach ($file in $extraFiles) {
-        $literal = ConvertTo-ODataLiteral -Value ([string]$file.ServerRelativeUrl)
-        $uri = New-AbsoluteUriText -Text ($Context.SiteUrl + "/_api/web/GetFileByServerRelativeUrl('$literal')/recycle()")
-        Assert-SpTargetIdentity -Context $Context -ExpectedId $Context.TargetRootId
-        [void](Invoke-SpActionPost -SiteUrl $Context.SiteUrl -Uri $uri)
+        $uri = New-AbsoluteUri ($Context.SiteUrl + "/_api/web/GetFileByServerRelativeUrl('$(ConvertTo-ODataLiteral ([string]$file.ServerRelativeUrl))')/recycle()")
+        Assert-SpTarget $Context
+        [void](Invoke-SpRequest -Method Post -SiteUrl $Context.SiteUrl -Uri $uri)
     }
 
-    $extraFolders = @($RemoteInventory.Folders | Where-Object { -not $expectedFolderKeys.ContainsKey((Get-PathKey -Path ([string]$_.RelativePath))) } |
+    $extraFolders = @($Remote.Folders | Where-Object { -not $Plan.FolderKeys.ContainsKey((Get-PathKey ([string]$_.RelativePath))) } |
         Sort-Object @{ Expression = { @(([string]$_.RelativePath).Split([char]47)).Count }; Descending = $true }, RelativePath)
     foreach ($folder in $extraFolders) {
-        $literal = ConvertTo-ODataLiteral -Value ([string]$folder.ServerRelativeUrl)
-        $uri = New-AbsoluteUriText -Text ($Context.SiteUrl + "/_api/web/GetFolderByServerRelativeUrl('$literal')/recycle()")
-        Assert-SpTargetIdentity -Context $Context -ExpectedId $Context.TargetRootId
-        [void](Invoke-SpActionPost -SiteUrl $Context.SiteUrl -Uri $uri)
+        $uri = New-AbsoluteUri ($Context.SiteUrl + "/_api/web/GetFolderByServerRelativeUrl('$(ConvertTo-ODataLiteral ([string]$folder.ServerRelativeUrl))')/recycle()")
+        Assert-SpTarget $Context
+        [void](Invoke-SpRequest -Method Post -SiteUrl $Context.SiteUrl -Uri $uri)
     }
-
     return [pscustomobject]@{ RecycledFiles = $extraFiles.Count; RecycledFolders = $extraFolders.Count }
 }
 
-function New-MirrorMutexName {
-    param([Parameter(Mandatory = $true)][object]$Configuration)
-
-    # Gleiche SharePoint-Ziele erhalten denselben systemweiten Mutex. So koennen ein
-    # manueller und ein geplanter Lauf nicht gleichzeitig dasselbe Ziel veraendern.
-    $identity = ('{0}|{1}|{2}|{3}' -f $Configuration.SharePointSiteUrl, $Configuration.LibraryName, $Configuration.TargetFolderPath, $Configuration.TargetFolderUniqueId).ToLowerInvariant()
-    $sha = [Security.Cryptography.SHA256]::Create()
-    try { $hash = $sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($identity)) }
-    finally { $sha.Dispose() }
-    $suffix = ([BitConverter]::ToString($hash)).Replace('-', '').Substring(0, 24)
-    return 'Global\PPSI_VisioSharePointMirror_' + $suffix
+function New-MutexName {
+    param([object]$Config)
+    # Wie in Python: GUID bindet die Sperre ans Ziel, auch bei URL-/Pfad-Aliasen.
+    return 'Global\PPSI_VisioSharePointMirror_' + ([guid]$Config.TargetFolderUniqueId).ToString('N').ToUpperInvariant()
 }
 
-$configuration = $null
+$config = $null
 $mutex = $null
 $mutexAcquired = $false
 $runPath = $null
 $exitCode = 1
 
-# -----------------------------------------------------------------------------
-# Einziger Betriebsablauf: vollstaendiger Spiegelabgleich
-# -----------------------------------------------------------------------------
-
 try {
-    # 1. Konfiguration lesen, Platzhalter ausschliessen und fortlaufendes Log starten.
-    $configuration = Read-MirrorConfiguration -LiteralPath $ConfigurationPath
-    Initialize-MirrorLog -LiteralPath $configuration.LogPath
-    Write-MirrorLog -Level INFO -Message 'Spiegel-Lauf gestartet.'
+    $config = Read-Configuration $ConfigurationPath
+    Initialize-Log $config.LogPath
+    Write-Log INFO 'Spiegel-Lauf gestartet.'
 
-    # 2. Exklusiven Lauf fuer genau dieses SharePoint-Ziel sichern.
-    $mutex = New-Object Threading.Mutex($false, (New-MirrorMutexName -Configuration $configuration))
+    $mutex = New-Object Threading.Mutex($false, (New-MutexName $config))
     try { $mutexAcquired = $mutex.WaitOne(0, $false) }
     catch [Threading.AbandonedMutexException] { $mutexAcquired = $true }
     if (-not $mutexAcquired) { throw 'Fuer dieses SharePoint-Ziel laeuft bereits ein Spiegel-Lauf.' }
 
-    # 3. Quelle vollstaendig lesen und das erwartete Zielbild vorab validieren.
-    $sourceInventory = @(Get-SourceInventory -RootPath $configuration.SourcePath)
-    $expectedFolders = @(Get-ExpectedFolders -Inventory $sourceInventory)
-    Assert-NoFileFolderCollisions -Inventory $sourceInventory -ExpectedFolders $expectedFolders
-    Write-MirrorLog -Level INFO -Message ("{0} Visio-Datei(en) gefunden." -f $sourceInventory.Count)
+    # 1. Vorab alles pruefen, was SharePoint-Aenderungen verhindern muss.
+    $source = @(Get-SourceInventory $config.SourcePath)
+    $plan = New-MirrorPlan $source
+    Write-Log INFO ("{0} Visio-Datei(en) gefunden." -f $source.Count)
 
-    # 4. SharePoint-Anmeldung, Bibliothek, Zielpfad und unveraenderliche Ziel-GUID pruefen.
-    $spContext = Get-SpContext -Configuration $configuration
-    Assert-SharePointPathLengths -Context $spContext -Inventory $sourceInventory -ExpectedFolders $expectedFolders
-    Write-MirrorLog -Level INFO -Message 'SharePoint-Ziel und Windows-Anmeldung wurden bestaetigt.'
+    $sp = Get-SpContext $config
+    Assert-SpPathLengths -Context $sp -Inventory $source -Folders $plan.Folders
+    Write-Log INFO 'SharePoint-Ziel und Windows-Anmeldung wurden bestaetigt.'
 
-    # 5. Alle Quellen lokal zwischenspeichern und mit einer Visio-Instanz konvertieren.
-    # Bis zum Abschluss dieser Phase erfolgen keine SharePoint-Schreibzugriffe.
+    # 2. Erst vollstaendig lokal konvertieren, dann SharePoint anfassen.
     $runPath = Join-Path ([IO.Path]::GetTempPath()) ('PPSI-VisioSharePointMirror-' + [guid]::NewGuid().ToString('N'))
     [void][IO.Directory]::CreateDirectory($runPath)
-    $artifacts = @(Convert-InventoryToPdf -Inventory $sourceInventory -RunPath $runPath)
-    Write-MirrorLog -Level INFO -Message ("{0} PDF-Datei(en) erzeugt." -f $artifacts.Count)
+    $artifacts = @(Convert-ToPdf -Inventory $source -RunPath $runPath)
+    Write-Log INFO ("{0} PDF-Datei(en) erzeugt." -f $artifacts.Count)
 
-    # 6. Eine waehrend der Konvertierung geaenderte Quelle verhindert jeden Upload.
-    $inventoryBeforeWrite = @(Get-SourceInventory -RootPath $configuration.SourcePath)
-    if (-not (Test-SameSourceInventory -Expected $sourceInventory -Actual $inventoryBeforeWrite)) {
+    if (-not (Test-SameInventory -Expected $source -Actual @(Get-SourceInventory $config.SourcePath))) {
         throw 'Die Quelle hat sich waehrend der Konvertierung geaendert; SharePoint blieb unveraendert.'
     }
 
-    # 7. Benoetigte Ordner anlegen und alle PDFs mit overwrite=true hochladen.
-    Assert-SpTargetIdentity -Context $spContext -ExpectedId $configuration.TargetFolderUniqueId
-    Ensure-SpFolders -Context $spContext -RelativeFolders $expectedFolders
-    Send-SpPdfs -Context $spContext -Artifacts $artifacts
-    Write-MirrorLog -Level INFO -Message ("{0} PDF-Datei(en) nach SharePoint hochgeladen." -f $artifacts.Count)
+    # 3. Nur nach erfolgreicher Konvertierung Ordner anlegen und PDFs hochladen.
+    Assert-SpTarget $sp
+    Ensure-SpFolders -Context $sp -Folders $plan.Folders
+    Send-SpPdfs -Context $sp -Artifacts $artifacts
+    Write-Log INFO ("{0} PDF-Datei(en) nach SharePoint hochgeladen." -f $artifacts.Count)
 
-    # 8. Nur nach vollstaendig erfolgreichem Upload die exakte Zielbereinigung starten.
-    $inventoryBeforeRecycle = @(Get-SourceInventory -RootPath $configuration.SourcePath)
-    if (-not (Test-SameSourceInventory -Expected $sourceInventory -Actual $inventoryBeforeRecycle)) {
+    # 4. Nur nach erfolgreichem Upload Ziel inventarisieren und Ueberzaehliges recyceln.
+    if (-not (Test-SameInventory -Expected $source -Actual @(Get-SourceInventory $config.SourcePath))) {
         throw 'Die Quelle hat sich waehrend des Uploads geaendert; Papierkorbaktionen wurden unterdrueckt.'
     }
-    Assert-SpTargetIdentity -Context $spContext -ExpectedId $configuration.TargetFolderUniqueId
-    $remoteInventory = Get-SpTargetInventory -Context $spContext
-    Assert-SpTargetIdentity -Context $spContext -ExpectedId $configuration.TargetFolderUniqueId
-    Assert-SpRemoteInventory -Context $spContext -RemoteInventory $remoteInventory -SourceInventory $sourceInventory -ExpectedFolders $expectedFolders
-    $inventoryAfterRemoteRead = @(Get-SourceInventory -RootPath $configuration.SourcePath)
-    if (-not (Test-SameSourceInventory -Expected $sourceInventory -Actual $inventoryAfterRemoteRead)) {
+    Assert-SpTarget $sp
+    $remote = Get-SpTargetInventory $sp
+    Assert-SpTarget $sp
+    Assert-SpRemoteInventory -Context $sp -Remote $remote -Plan $plan
+    if (-not (Test-SameInventory -Expected $source -Actual @(Get-SourceInventory $config.SourcePath))) {
         throw 'Die Quelle hat sich waehrend der SharePoint-Inventur geaendert; Papierkorbaktionen wurden unterdrueckt.'
     }
-    Assert-SpTargetIdentity -Context $spContext -ExpectedId $configuration.TargetFolderUniqueId
-    $recycleResult = Invoke-SpRecycleExtras -Context $spContext -RemoteInventory $remoteInventory -SourceInventory $sourceInventory -ExpectedFolders $expectedFolders
-
-    Write-MirrorLog -Level INFO -Message ("Spiegelabgleich abgeschlossen: {0} Datei(en) und {1} Ordner recycelt." -f $recycleResult.RecycledFiles, $recycleResult.RecycledFolders)
+    Assert-SpTarget $sp
+    $result = Invoke-SpRecycleExtras -Context $sp -Remote $remote -Plan $plan
+    Write-Log INFO ("Spiegelabgleich abgeschlossen: {0} Datei(en) und {1} Ordner recycelt." -f $result.RecycledFiles, $result.RecycledFolders)
     $exitCode = 0
 }
 catch {
     $message = if ([string]::IsNullOrWhiteSpace($_.Exception.Message)) { 'Unbekannter Fehler im Spiegel-Lauf.' } else { $_.Exception.Message }
-    try { Write-MirrorLog -Level ERROR -Message $message }
-    catch { [Console]::Error.WriteLine($message) }
+    try { Write-Log ERROR $message } catch { [Console]::Error.WriteLine($message) }
     $exitCode = 1
 }
 finally {
-    # Temporaere Dateien und Mutex werden bei Erfolg und bei jedem Fehler freigegeben.
-    if (-not [string]::IsNullOrWhiteSpace($runPath) -and [IO.Directory]::Exists($runPath)) {
+    if ($runPath -and [IO.Directory]::Exists($runPath)) {
         try { [IO.Directory]::Delete($runPath, $true) }
         catch {
             $exitCode = 1
-            try { Write-MirrorLog -Level ERROR -Message 'Das temporaere Laufverzeichnis konnte nicht vollstaendig entfernt werden.' }
-            catch {}
+            try { Write-Log ERROR 'Das temporaere Laufverzeichnis konnte nicht vollstaendig entfernt werden.' } catch {}
         }
     }
-    if ($mutexAcquired -and $null -ne $mutex) {
-        try { $mutex.ReleaseMutex() }
-        catch {}
-    }
-    if ($null -ne $mutex) { $mutex.Dispose() }
+    if ($mutexAcquired -and $mutex) { try { $mutex.ReleaseMutex() } catch {} }
+    if ($mutex) { $mutex.Dispose() }
 }
 
 exit $exitCode

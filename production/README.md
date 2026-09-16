@@ -56,6 +56,7 @@ P:\Quelle\A\B\Datei.vsdx
 ```
 
 - Verarbeitet werden `.vsd`, `.vsdx` und `.vsdm`; andere Dateien und leere Ordner werden ignoriert.
+- Visio öffnet lokale Kopien schreibgeschützt mit deaktivierten Makros. Exportiert werden alle Vordergrundseiten in Druckqualität; Hintergründe, Dokumenteigenschaften und Strukturtags folgen den Visio-Standardeinstellungen.
 - Jede Visio-Datei wird bei jedem Lauf neu konvertiert und mit `overwrite=true` hochgeladen.
 - Erst nach vollständigem Scan, erfolgreicher Konvertierung aller Dateien, erfolgreichem Upload und erneuter Zielprüfung werden überzählige Inhalte recycelt.
 - Ist die Quelle leer, werden alle Inhalte unterhalb des Zielordners in den SharePoint-Papierkorb verschoben. Der Zielordner selbst bleibt bestehen.

@@ -1,8 +1,8 @@
 # PPSI Visio–SharePoint Mirror
 
-Das aktuelle Betriebspaket liegt vollständig in [`production`](production/). Es durchsucht einen konfigurierten Windows-Ordner rekursiv, konvertiert `.vsd`, `.vsdx` und `.vsdm` mit lokalem Microsoft Visio in PDF und spiegelt ausschließlich diese PDFs samt benötigter Ordnerstruktur in einen dedizierten SharePoint-Server-2019-Zielordner.
+Der Spiegel durchsucht einen konfigurierten Windows-Ordner rekursiv, konvertiert `.vsd`, `.vsdx` und `.vsdm` mit lokalem Microsoft Visio in PDF und spiegelt ausschließlich diese PDFs samt benötigter Ordnerstruktur in einen dedizierten SharePoint-Server-2019-Zielordner. Die PowerShell-Fassung liegt in [`production`](production/), die zusätzliche Python-Fassung in [`python`](python/README.md).
 
-## Aktuelles Betriebspaket
+## PowerShell-Betriebspaket
 
 ```text
 production/
@@ -21,15 +21,43 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Invoke-VisioSharePoint
 Konfiguration, Voraussetzungen, Löschschutz und Aufgabenplanung sind in [`production/README.md`](production/README.md) beschrieben.
 Die ausgelieferte `production/mirror.json` enthält ausschließlich deutlich markierte Platzhalter und muss vor dem Einsatz vollständig ausgefüllt werden.
 
+## Python-Alternative
+
+[`python/README.md`](python/README.md) erklärt Einrichtung und Start der Python-Fassung. Sie verwendet dieselben sechs Konfigurationsschlüssel sowie `pywin32`, `requests` und Windows-SSPI. Windows und lokales Visio bleiben erforderlich. Die Python-Demo funktioniert unabhängig davon ohne Zusatzbibliotheken:
+
+```powershell
+py -3 python\demo_mirror.py
+```
+
+Beide Varianten verwenden für identisch konfigurierte Ziele dieselbe Windows-Sperre gegen parallele Läufe auf einem Host. Für den Regelbetrieb wird eine der beiden Varianten eingeplant.
+
+## Ablauf in der Kommandozeile ansehen
+
+Die unabhängige [Konsolen-Demo](demo/README.md) zeigt den Ablauf mit festen Beispieldaten. Sie benötigt weder Konfiguration noch Visio oder SharePoint und führt ausschließlich Konsolenausgaben aus:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\demo\Show-VisioSharePointMirror.ps1
+```
+
+Mit `-Scenario UploadError` wird ein Uploadfehler ohne anschließende Bereinigung dargestellt, mit `-Scenario EmptySource` eine leere Quelle. Alle Ausgaben sind als `[DEMO]` markiert. Die Demo prüft keine echte Umgebung und gehört nicht zum Betriebspaket.
+
 ## Repository-Bereiche
 
-- `production/` ist das einzige aktuelle und auszuliefernde Betriebspaket.
+- `production/` enthält das eigenständige PowerShell-Betriebspaket.
+- `python/` enthält die Python-Alternative mit Konfiguration, Abhängigkeiten, Anleitung und separater Konsolen-Demo.
 - `src/` enthält das frühere mehrstufige Pipeline-Gerüst einschließlich ausdrücklich markierter Legacy-Platzhalter zur Nachvollziehbarkeit und wird vom aktuellen Skript weder geladen noch benötigt.
-- `tests/` enthält die Tests des früheren Gerüsts und gehört nicht zum Betriebspaket.
+- `demo/` enthält die eigenständige Konsolen-Demo ohne echte Verarbeitung.
+- `tests/Test-Mirror.ps1` und `tests/test_python_mirror.py` prüfen die beiden Spiegel-Varianten mit simulierten SharePoint-Antworten. Die übrigen Tests betreffen das frühere Gerüst. Tests gehören nicht zum Betriebspaket.
 - `docs/` enthält das frühere Entscheidungsregister und Projektnotizen.
 - `config/` enthält Beispielkonfigurationen des früheren Gerüsts.
 
-Das neue Betriebsskript dot-sourct oder importiert keine Dateien aus diesen historischen Bereichen. Es besitzt keine Validate-, Preview-, Simulate-, DryRun- oder Testmodi und führt keine inkrementelle State-Datei.
+Das Betriebsskript ist eigenständig und lädt keine Dateien aus den anderen Repository-Bereichen. Es besitzt keine Validate-, Preview-, Simulate-, DryRun- oder Testmodi und führt keine inkrementelle State-Datei.
+
+Die Regressionstests werden separat unter Windows PowerShell 5.1 ausgeführt. Sie laden nur Funktionsdefinitionen und ersetzen Netzwerkaufrufe durch Testantworten; ein echter Visio-/SharePoint-Integrationslauf wird damit nicht ersetzt:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-Mirror.ps1
+```
 
 ## Festgelegtes Verhalten
 
