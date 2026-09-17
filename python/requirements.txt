@@ -1,0 +1,4 @@
+# Laufzeit fuer Windows / CPython 3.11+; Demo und Unit-Tests nutzen nur die Standardbibliothek.
+pywin32==312; sys_platform == "win32"
+requests==2.34.2
+requests-negotiate-sspi==0.5.2; sys_platform == "win32"

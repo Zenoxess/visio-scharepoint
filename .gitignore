@@ -18,6 +18,9 @@ config/*.secrets.json
 .build/
 outputs/
 node_modules/
+.venv/
+__pycache__/
+*.py[cod]
 
 # Betriebssystem und Editoren
 .DS_Store
