@@ -2,6 +2,15 @@
 
 Aufruf: python visio_sharepoint_mirror.py --config mirror.json
 Die Konsolen-Demo steht separat in demo_mirror.py.
+
+Ablauf: Konfiguration lesen, Quelle erfassen, SharePoint-Ziel pruefen,
+alle Zeichnungen lokal in PDF umwandeln, PDFs hochladen und erst danach
+ueberzaehlige Zielinhalte in den SharePoint-Papierkorb verschieben.
+
+Dies ist eine Vollspiegelung: Auch bei unveraenderten Quellen wird alles
+neu exportiert. Eine leere Quelle fuehrt zur Bereinigung aller Zielinhalte.
+Der Zielordner muss deshalb ausschliesslich fuer diesen Spiegel bestimmt sein.
+Es gibt keinen DryRun-Modus. Einrichtung und Praxistest: siehe README.md.
 """
 
 from __future__ import annotations
@@ -24,6 +33,8 @@ from uuid import UUID, uuid4
 
 LOG = logging.getLogger("mirror")
 EXTENSIONS = {".vsd", ".vsdx", ".vsdm"}
+# Das verbose-Format liefert die unten ausgewerteten OData-Felder d/results.
+# Der zweite Header fordert Windows-Anmeldung statt einer Formularanmeldeseite an.
 HEADERS = {"Accept": "application/json;odata=verbose", "X-FORMS_BASED_AUTH_ACCEPTED": "f"}
 
 
@@ -32,10 +43,14 @@ class MirrorError(RuntimeError):
 
 
 def path_key(path: str) -> str:
+    """Vergleichsschluessel ohne Unterschiede in Slash, Unicode oder Grossschreibung."""
     return unicodedata.normalize("NFC", path.replace("\\", "/").strip("/")).lower()
 
 
 def safe_segment(name: str) -> None:
+    """Ein einzelner Datei-/Ordnername muss zur verwendeten REST-Adressierung passen."""
+    # Bewusst eingeschraenkte Namen: keine Traversierung, reservierten Windows-
+    # Namen oder Zeichen, die mit der verwendeten SharePoint-API kollidieren.
     if (not name or name != name.strip() or name in {".", ".."}
             or name.endswith(".") or len(name) > 128
             or any(c in '~"#%&*:<>?/\\{|}[]' or unicodedata.category(c) == "Cc" for c in name)
@@ -44,6 +59,7 @@ def safe_segment(name: str) -> None:
 
 
 def safe_relative(path: str) -> str:
+    """Relativen Pfad vereinheitlichen und jedes Segment einzeln pruefen."""
     path = path.replace("\\", "/")
     for segment in path.split("/"):
         safe_segment(segment)
@@ -51,16 +67,19 @@ def safe_relative(path: str) -> str:
 
 
 def join_url(root: str, relative: str) -> str:
+    """Bereits gepruefte SharePoint-Pfade mit genau einem Trenner verbinden."""
     return root.rstrip("/") + "/" + relative
 
 
 def odata(value: str) -> str:
+    """Einen Wert fuer ein OData-Stringliteral innerhalb einer URL maskieren."""
     # OData maskiert Apostrophe, URL-Encoding schuetzt die restliche URL-Syntax.
     return quote(value.replace("'", "''"), safe="/")
 
 
 @dataclass(frozen=True)
 class Config:
+    """Gepruefte Einstellungen; frozen verhindert spaeteres Neuzuweisen der Felder."""
     source: Path
     site_url: str
     library_name: str
@@ -70,6 +89,8 @@ class Config:
 
     @classmethod
     def load(cls, path: Path) -> Config:
+        """Die sechs JSON-Werte lesen und vor externen Zugriffen validieren."""
+        # utf-8-sig akzeptiert auch Dateien, die ein Windows-Editor mit BOM speichert.
         raw = json.loads(Path(path).read_text(encoding="utf-8-sig"))
         fields = {"SourcePath", "SharePointSiteUrl", "LibraryName", "TargetFolderPath", "TargetFolderUniqueId", "LogPath"}
         if not isinstance(raw, dict) or set(raw) != fields:
@@ -78,6 +99,7 @@ class Config:
             if not isinstance(value, str) or not value.strip() or value.startswith("__PLATZHALTER_"):
                 raise MirrorError(f"Konfigurationswert {name} fehlt, ist leer oder noch ein Platzhalter.")
         source, log = (PureWindowsPath(raw[name]) for name in ("SourcePath", "LogPath"))
+        # Auch UNC-Pfade sind erlaubt; Laufwerks-/Freigabewurzeln als Quelle nicht.
         for value in (source, log):
             if not value.is_absolute() or not value.name or str(value).startswith(("\\\\?\\", "\\\\.\\")):
                 raise MirrorError("Quelle und Logdatei brauchen absolute Windows-Pfade unterhalb einer Wurzel.")
@@ -88,8 +110,12 @@ class Config:
             raise MirrorError("SharePointSiteUrl muss eine HTTPS-Site ohne Zugangsdaten, Query oder Fragment sein.")
         site.port  # Ungueltige Portangaben vor dem ersten Netzwerkzugriff ablehnen.
         library = raw["LibraryName"].strip()
-        safe_segment(library)
+        # LibraryName ist der Anzeigename, kein Pfadsegment. Zeichen wie & oder
+        # Apostrophe sind hier erlaubt und werden spaeter von odata() maskiert.
+        if len(library) > 255 or any(unicodedata.category(c) == "Cc" for c in library):
+            raise MirrorError("LibraryName darf maximal 255 Zeichen und keine Steuerzeichen enthalten.")
         target = safe_relative(raw["TargetFolderPath"])
+        # Der Name allein reicht nicht: Die GUID bindet den Lauf an diesen Ordner.
         target_id = UUID(raw["TargetFolderUniqueId"])
         if not target_id.int:
             raise MirrorError("TargetFolderUniqueId darf keine leere GUID sein.")
@@ -98,6 +124,7 @@ class Config:
 
 @dataclass(frozen=True)
 class SourceFile:
+    """Eine Quelldatei mit PDF-Zielpfad sowie Groesse/Zeit fuer spaetere Vergleiche."""
     source: Path
     relative: str
     target: str
@@ -107,12 +134,14 @@ class SourceFile:
 
 @dataclass(frozen=True)
 class Artifact:
+    """Zuordnung einer fertig exportierten lokalen PDF zu ihrem relativen Zielpfad."""
     target: str
     pdf: Path
 
 
 @dataclass(frozen=True)
 class Plan:
+    """Erwartete Zielpfade und Ordner, sortiert mit Eltern vor ihren Unterordnern."""
     file_keys: set[str]
     folder_keys: set[str]
     folders: tuple[str, ...]
@@ -120,21 +149,29 @@ class Plan:
 
 @dataclass(frozen=True)
 class RemoteItem:
+    """Zieleintrag mit relativem Vergleichspfad und serverrelativem REST-Pfad."""
     relative: str
     url: str
 
 
 @dataclass(frozen=True)
 class RemoteInventory:
+    """Erfasster Inhalt unterhalb des Zielordners; der Zielordner selbst fehlt hier."""
     files: list[RemoteItem]
     folders: list[RemoteItem]
 
 
 def is_reparse(info: os.stat_result) -> bool:
+    """Links und Windows-Reparse-Points erkennen, etwa Junctions im Quellbaum."""
     return stat.S_ISLNK(info.st_mode) or bool(getattr(info, "st_file_attributes", 0) & 0x400)
 
 
 def scan_source(root: Path) -> list[SourceFile]:
+    """Die Quelle vollstaendig erfassen; bei Zugriffsfehlern den Lauf abbrechen.
+
+    Groesse und Aenderungszeit werden gespeichert, nicht der Dateiinhalt.
+    Inhaltliche Aenderungen mit gleicher Groesse und Zeit bleiben unerkannt.
+    """
     root = Path(root)
     if not root.is_absolute() or root == Path(root.anchor):
         raise MirrorError("Die Quelle muss ein absoluter Ordner unterhalb einer Wurzel sein.")
@@ -153,9 +190,12 @@ def scan_source(root: Path) -> list[SourceFile]:
                 if stat.S_ISDIR(info.st_mode):
                     stack.append(path)
                 elif stat.S_ISREG(info.st_mode) and path.suffix.lower() in EXTENSIONS and not path.name.startswith("~$"):
+                    # Visio-Sperrdateien (~$) ignorieren. Der Quellordnername wird
+                    # Teil des Ziels: Quelle/A.vsdx -> <Ziel>/Quelle/A.pdf.
                     relative = safe_relative(path.relative_to(root).as_posix())
                     target = safe_relative(f"{root.name}/{Path(relative).with_suffix('.pdf').as_posix()}")
                     key = path_key(target)
+                    # A.vsd und A.vsdx duerfen nicht beide dieselbe A.pdf erzeugen.
                     if key in owners:
                         raise MirrorError(f"Mehrere Quellen erzeugen denselben PDF-Zielpfad: {target}")
                     owners.add(key)
@@ -164,6 +204,7 @@ def scan_source(root: Path) -> list[SourceFile]:
 
 
 def build_plan(sources: list[SourceFile]) -> Plan:
+    """Aus den Quellen den Sollbestand ableiten, ohne Dateien oder Ordner anzulegen."""
     files, folders = set(), {}
     for item in sources:
         target = safe_relative(item.target)
@@ -179,11 +220,16 @@ def build_plan(sources: list[SourceFile]) -> Plan:
                 raise MirrorError(f"Mehrdeutiger Zielordner: {folder}")
             folders[key] = folder
     if files.intersection(folders):
+        # Beispiel: A.pdf als Datei kollidiert mit dem Ordner A.pdf/Unterdatei.pdf.
         raise MirrorError("Ein PDF-Zielpfad kollidiert mit einem benoetigten Ordner.")
     return Plan(files, set(folders), tuple(sorted(folders.values(), key=lambda p: (p.count("/"), p))))
 
 
 def validate_remote(root: str, remote: RemoteInventory, plan: Plan) -> None:
+    """Vor der Bereinigung Pfadgrenzen und Vollstaendigkeit des Sollbestands pruefen.
+
+    Dies prueft die Existenz der erwarteten Pfade, keinen PDF-Inhaltsvergleich.
+    """
     keys = []
     for items in (remote.files, remote.folders):
         found = set()
@@ -199,7 +245,10 @@ def validate_remote(root: str, remote: RemoteInventory, plan: Plan) -> None:
 
 
 class SharePoint:
+    """REST-Zugriff mit Windows-Anmeldung; Tests koennen eine Fake-Session einsetzen."""
+
     def __init__(self, config: Config, session=None):
+        # Die spaeten Imports erlauben lokale Logiktests ohne Windows-Zusatzpakete.
         self.config, self.root = config, ""
         if session is None:
             import requests
@@ -210,15 +259,19 @@ class SharePoint:
         self.session = session
 
     def close(self) -> None:
+        """Verbindungen der HTTP-Session freigeben."""
         self.session.close()
 
     def api(self, path: str) -> str:
+        """Einen REST-Endpunkt innerhalb der konfigurierten Site bilden."""
         return self.config.site_url + "/_api/" + path
 
     def folder_url(self, server_relative: str, suffix: str = "") -> str:
+        """Ordner ueber seinen serverrelativen Pfad adressieren."""
         return self.api(f"web/GetFolderByServerRelativeUrl('{odata(server_relative)}'){suffix}")
 
     def _check_api_url(self, url: str) -> None:
+        """Auch Fortsetzungslinks auf HTTPS und den API-Bereich derselben Site begrenzen."""
         site, candidate = urlsplit(self.config.site_url), urlsplit(url)
         if (candidate.scheme != "https" or candidate.hostname != site.hostname
                 or (candidate.port or 443) != (site.port or 443)
@@ -228,9 +281,13 @@ class SharePoint:
             raise MirrorError("SharePoint lieferte eine unsichere API-/Paging-URL.")
 
     def _request(self, method: str, url: str, *, write=False, allow_missing=False, data=None, json=None):
+        """HTTP-Aufruf ausfuehren; fehlende Eintraege nur bei explizitem GET erlauben."""
         self._check_api_url(url)
         headers = HEADERS.copy()
         if write:
+            # FormDigest ist SharePoints Schreibschutz-Token, kein Kennwort.
+            # Pro Schreibaufruf neu holen, damit lange Konvertierungen kein altes
+            # Token hinterlassen. Der contextinfo-Aufruf braucht selbst keines.
             digest = self._request("POST", self.api("contextinfo"))["d"]["GetContextWebInformation"]["FormDigestValue"]
             if not isinstance(digest, str) or not digest:
                 raise MirrorError("SharePoint lieferte keinen FormDigest.")
@@ -241,6 +298,7 @@ class SharePoint:
             headers["Content-Type"] = "application/json;odata=verbose"
         response = self.session.request(method, url, headers=headers, timeout=(30, 300),
                                         allow_redirects=False, data=data, json=json)
+        # Kein stilles Folgen einer Anmeldeseite/anderen Site. TLS bleibt aktiv.
         if method == "GET" and allow_missing and response.status_code == 404:
             return None
         if not 200 <= response.status_code < 300:
@@ -248,6 +306,7 @@ class SharePoint:
         return response.json() if response.content else None
 
     def initialize(self) -> None:
+        """Bibliothek und bestehenden Zielordner pruefen; noch nichts schreiben."""
         library = self._request("GET", self.api(
             f"web/lists/getbytitle('{odata(self.config.library_name)}')?$select=ForceCheckout,RootFolder/ServerRelativeUrl&$expand=RootFolder"))["d"]
         if library["ForceCheckout"]:
@@ -259,11 +318,13 @@ class SharePoint:
         self.assert_target()
 
     def assert_target(self) -> None:
+        """Pfad UND stabile Ordner-ID erneut pruefen, besonders vor Schreibzugriffen."""
         folder = self._request("GET", self.folder_url(self.root, "?$select=ServerRelativeUrl,UniqueId"))["d"]
         if UUID(folder["UniqueId"]) != self.config.target_id or path_key(folder["ServerRelativeUrl"]) != path_key(self.root):
             raise MirrorError("Der SharePoint-Zielordner stimmt nicht mit Pfad und TargetFolderUniqueId ueberein.")
 
     def ensure_folders(self, plan: Plan) -> None:
+        """Fehlende Sollordner von oben nach unten anlegen und anschliessend lesen."""
         for folder in plan.folders:
             url = join_url(self.root, folder)
             if self._request("GET", self.folder_url(url), allow_missing=True) is None:
@@ -273,14 +334,17 @@ class SharePoint:
                 self._request("GET", self.folder_url(url))
 
     def upload(self, artifacts: list[Artifact]) -> None:
+        """Jede PDF binaer hochladen; vorhandene PDFs am selben Pfad ueberschreiben."""
         for artifact in artifacts:
             parent, name = artifact.target.rsplit("/", 1)
             url = self.folder_url(join_url(self.root, parent), f"/Files/add(url='{odata(name)}',overwrite=true)")
             self.assert_target()
             # Bytes bleiben auch ueber mehrere NTLM-Challenges vollstaendig wiederholbar.
+            # Dafuer wird jeweils eine ganze PDF in den Arbeitsspeicher geladen.
             self._request("POST", url, write=True, data=artifact.pdf.read_bytes())
 
     def pages(self, url: str) -> list[dict]:
+        """Alle OData-Seiten lesen; Schleifen und auffaellige Abschneidung ablehnen."""
         result, visited = [], set()
         while url:
             if url in visited:
@@ -297,6 +361,7 @@ class SharePoint:
         return result
 
     def inventory(self) -> RemoteInventory:
+        """Dateien und Unterordner des Ziels rekursiv ueber die REST-API erfassen."""
         files, folders, stack, visited = [], [], [(self.root, "")], set()
         while stack:
             current, relative = stack.pop()
@@ -316,9 +381,16 @@ class SharePoint:
         return RemoteInventory(files, folders)
 
     def recycle(self, remote: RemoteInventory, plan: Plan) -> tuple[int, int]:
+        """Ueberzaehliges recyceln; Anzahl der Dateien und Ordner zurueckgeben.
+
+        Auch fremde Inhalte im dedizierten Ziel gelten als ueberzaehlig.
+        Bereits erfolgreiche Aktionen werden bei einem spaeteren Fehler nicht
+        zurueckgerollt. Der konfigurierte Zielordner selbst wird nicht recycelt.
+        """
         validate_remote(self.root, remote, plan)
         counts = []
         for kind, items, expected in (("File", remote.files, plan.file_keys), ("Folder", remote.folders, plan.folder_keys)):
+            # Zuerst Dateien entfernen, danach tiefere Ordner vor ihren Eltern.
             extras = sorted((item for item in items if path_key(item.relative) not in expected),
                             key=lambda item: (-item.relative.count("/"), item.relative))
             for item in extras:
@@ -329,24 +401,31 @@ class SharePoint:
 
 
 def convert_to_pdf(sources: list[SourceFile], workdir: Path) -> list[Artifact]:
+    """Lokale Arbeitskopien mit einer eigenen Visio-Instanz als PDFs exportieren."""
     if not sources:
         return []
     import pythoncom
     from win32com.client import DispatchEx
 
     artifacts, visio = [], None
+    # Visio-COM wird auf diesem Thread im Single-Threaded Apartment betrieben.
     pythoncom.CoInitializeEx(pythoncom.COINIT_APARTMENTTHREADED)
     try:
         visio = DispatchEx("Visio.Application", clsctx=pythoncom.CLSCTX_LOCAL_SERVER)
         visio.Visible, visio.AlertResponse = False, 7
+        # 7 entspricht der Standardantwort Nein auf Visio-Rueckfragen.
+        # Das ersetzt keinen Laufzeitabbruch, falls Visio dennoch haengen bleibt.
         for item in sources:
             copy = workdir / (uuid4().hex + item.source.suffix)
             pdf = workdir / (uuid4().hex + ".pdf")
             shutil.copyfile(item.source, copy)
             document = None
             try:
-                # Read-only, DontList, Hidden, MacrosDisabled, NoWorkspace.
+                # OpenEx-Bitflags: 2 schreibgeschuetzt, 8 nicht in Zuletzt verwendet,
+                # 64 verborgen, 128 Makros aus, 256 keinen Arbeitsbereich laden.
                 document = visio.Documents.OpenEx(str(copy), 2 | 8 | 64 | 128 | 256)
+                # ExportAsFixedFormat: 1 PDF, 1 Druckqualitaet, 0 alle Vordergrundseiten.
+                # Weitere Optionen (z. B. Hintergruende) bleiben Visio-Standard.
                 document.ExportAsFixedFormat(1, str(pdf), 1, 0)
             except Exception as exc:
                 raise MirrorError(f"Visio-Konvertierung fehlgeschlagen: {item.relative}") from exc
@@ -357,10 +436,12 @@ def convert_to_pdf(sources: list[SourceFile], workdir: Path) -> list[Artifact]:
                     finally:
                         document = None
             with pdf.open("rb") as result:
+                # Nur eine Format-Signaturpruefung; Layout/Seitenzahl im Praxistest ansehen.
                 if result.read(5) != b"%PDF-":
                     raise MirrorError(f"Visio erzeugte keine gueltige PDF: {item.relative}")
             artifacts.append(Artifact(item.target, pdf))
     finally:
+        # Auch bei einer defekten Zeichnung Dokument/Visio/COM wieder freigeben.
         try:
             if visio is not None:
                 visio.Quit()
@@ -371,17 +452,24 @@ def convert_to_pdf(sources: list[SourceFile], workdir: Path) -> list[Artifact]:
 
 
 def mutex_name(config: Config) -> str:
+    """Den Sperrnamen stabil aus der SharePoint-Ziel-ID ableiten."""
     # Derselbe Name wie PowerShell, unabhaengig von URL-Alias oder Pfadschreibweise.
     return "Global\\PPSI_VisioSharePointMirror_" + config.target_id.hex.upper()
 
 
 @contextmanager
 def target_lock(config: Config):
+    """Gleichzeitige Laeufe fuer dasselbe Ziel auf diesem Windows-Host verhindern.
+
+    Die Sperre gilt sitzungsuebergreifend, aber nicht auf anderen Rechnern.
+    """
     import win32event
     import win32api
 
     handle, acquired = win32event.CreateMutex(None, False, mutex_name(config)), False
     try:
+        # Wartezeit 0: Ein belegtes Ziel sofort melden. Eine verwaiste Sperre
+        # darf nach dem Ende ihres vorherigen Prozesses uebernommen werden.
         acquired = win32event.WaitForSingleObject(handle, 0) in (0, 128)  # OBJECT_0 / ABANDONED
         if not acquired:
             raise MirrorError("Fuer dieses SharePoint-Ziel laeuft bereits ein Spiegel-Lauf.")
@@ -395,7 +483,14 @@ def target_lock(config: Config):
 
 
 def run_mirror(config: Config, sp: SharePoint, *, scanner=scan_source, converter=convert_to_pdf) -> tuple[int, int]:
+    """Den vollstaendigen Spiegelablauf in festgelegter Reihenfolge ausfuehren.
+
+    scanner/converter sind fuer Offline-Tests austauschbar. Fehler propagieren
+    zu main(); dadurch wird eine noch nicht begonnene Bereinigung uebersprungen.
+    Bereits erfolgte Uploads werden bei einem spaeteren Fehler nicht rueckgaengig.
+    """
     LOG.info("Spiegel-Lauf gestartet.")
+    # 1. Vollstaendige Quelle und Sollstruktur kennen, dann das reale Ziel pruefen.
     source = scanner(config.source)
     plan = build_plan(source)
     LOG.info("%s Visio-Datei(en) gefunden.", len(source))
@@ -404,6 +499,7 @@ def run_mirror(config: Config, sp: SharePoint, *, scanner=scan_source, converter
         raise MirrorError("Mindestens ein SharePoint-Zielpfad ueberschreitet 260 Zeichen.")
     LOG.info("SharePoint-Ziel und Windows-Anmeldung wurden bestaetigt.")
     with tempfile.TemporaryDirectory(prefix="PPSI-VisioSharePointMirror-") as temporary:
+        # 2. Erst ALLE PDFs lokal erzeugen. Bis hier wird auf SharePoint nur gelesen.
         artifacts = converter(source, Path(temporary))
         if len(artifacts) != len(source) or {path_key(a.target) for a in artifacts} != plan.file_keys:
             raise MirrorError("Die Konvertierung lieferte nicht den vollstaendigen PDF-Bestand.")
@@ -411,24 +507,33 @@ def run_mirror(config: Config, sp: SharePoint, *, scanner=scan_source, converter
         if scanner(config.source) != source:
             raise MirrorError("Die Quelle hat sich waehrend der Konvertierung geaendert; SharePoint blieb unveraendert.")
         sp.assert_target()
+        # 3. Erst nach erfolgreicher Konvertierung und erneutem Quellvergleich schreiben.
         sp.ensure_folders(plan)
         sp.upload(artifacts)
         LOG.info("%s PDF-Datei(en) nach SharePoint hochgeladen.", len(artifacts))
         if scanner(config.source) != source:
             raise MirrorError("Die Quelle hat sich waehrend des Uploads geaendert; Papierkorbaktionen wurden unterdrueckt.")
         sp.assert_target()
+        # 4. Ziel erneut erfassen und Sollbestand pruefen, bevor etwas recycelt wird.
         remote = sp.inventory()
         sp.assert_target()
         validate_remote(sp.root, remote, plan)
         if scanner(config.source) != source:
             raise MirrorError("Die Quelle hat sich waehrend der Zielinventur geaendert; Papierkorbaktionen wurden unterdrueckt.")
         sp.assert_target()
+        # Eine leere, erfolgreich gelesene Quelle hat einen leeren Sollbestand:
+        # In diesem Fall wird der gesamte Inhalt unterhalb des Ziels recycelt.
         result = sp.recycle(remote, plan)
         LOG.info("Spiegelabgleich abgeschlossen: %s Datei(en) und %s Ordner recycelt.", *result)
     return result
 
 
 def main(argv=None) -> int:
+    """CLI-Einstieg: Konfiguration, Logging, Sperre und Ressourcen verwalten.
+
+    Rueckgabe fuer Konsole/Aufgabenplanung: 0 bei Erfolg, 1 bei Laufzeitfehlern.
+    argparse behandelt ungueltige Kommandozeilenargumente separat (Exitcode 2).
+    """
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", required=True, type=Path, help="Pfad zur mirror.json")
     args = parser.parse_args(argv)
@@ -451,6 +556,7 @@ def main(argv=None) -> int:
                 sp.close()
         return 0
     except ImportError as exc:
+        # Installation muss mit genau dem Python erfolgen, das diesen Lauf startet.
         LOG.error("Python-Abhaengigkeit fehlt (%s). Installieren mit: python -m pip install -r requirements.txt", exc.name)
     except Exception as exc:
         LOG.error("%s", exc)
@@ -462,4 +568,5 @@ def main(argv=None) -> int:
 
 
 if __name__ == "__main__":
+    # Beim Import durch Unit-Tests wird main() nicht gestartet.
     raise SystemExit(main())

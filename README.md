@@ -1,6 +1,6 @@
 # PPSI Visio–SharePoint Mirror
 
-Der Spiegel durchsucht einen konfigurierten Windows-Ordner rekursiv, konvertiert `.vsd`, `.vsdx` und `.vsdm` mit lokalem Microsoft Visio in PDF und spiegelt ausschließlich diese PDFs samt benötigter Ordnerstruktur in einen dedizierten SharePoint-Server-2019-Zielordner. Die PowerShell-Fassung liegt in [`production`](production/), die zusätzliche Python-Fassung in [`python`](python/README.md).
+Der Spiegel durchsucht einen konfigurierten Windows-Ordner rekursiv, konvertiert `.vsd`, `.vsdx` und `.vsdm` mit lokalem Microsoft Visio in PDF und spiegelt ausschließlich diese PDFs samt benötigter Ordnerstruktur in einen dedizierten SharePoint-Server-2019-Zielordner. Der weitere Entwicklungsschwerpunkt liegt auf der [Python-Fassung](python/README.md). Die PowerShell-Fassung in [`production`](production/) bleibt als Alternative erhalten.
 
 ## PowerShell-Betriebspaket
 
@@ -21,7 +21,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Invoke-VisioSharePoint
 Konfiguration, Voraussetzungen, Löschschutz und Aufgabenplanung sind in [`production/README.md`](production/README.md) beschrieben.
 Die ausgelieferte `production/mirror.json` enthält ausschließlich deutlich markierte Platzhalter und muss vor dem Einsatz vollständig ausgefüllt werden.
 
-## Python-Alternative
+## Python-Version (Entwicklungsschwerpunkt)
 
 [`python/README.md`](python/README.md) erklärt Einrichtung und Start der Python-Fassung. Sie verwendet dieselben sechs Konfigurationsschlüssel sowie `pywin32`, `requests` und Windows-SSPI. Windows und lokales Visio bleiben erforderlich. Die Python-Demo funktioniert unabhängig davon ohne Zusatzbibliotheken:
 
@@ -44,7 +44,7 @@ Mit `-Scenario UploadError` wird ein Uploadfehler ohne anschließende Bereinigun
 ## Repository-Bereiche
 
 - `production/` enthält das eigenständige PowerShell-Betriebspaket.
-- `python/` enthält die Python-Alternative mit Konfiguration, Abhängigkeiten, Anleitung und separater Konsolen-Demo.
+- `python/` enthält die Python-Fassung als Entwicklungsschwerpunkt mit Konfiguration, Abhängigkeiten, Anleitung und separater Konsolen-Demo.
 - `src/` enthält das frühere mehrstufige Pipeline-Gerüst einschließlich ausdrücklich markierter Legacy-Platzhalter zur Nachvollziehbarkeit und wird vom aktuellen Skript weder geladen noch benötigt.
 - `demo/` enthält die eigenständige Konsolen-Demo ohne echte Verarbeitung.
 - `tests/Test-Mirror.ps1` und `tests/test_python_mirror.py` prüfen die beiden Spiegel-Varianten mit simulierten SharePoint-Antworten. Die übrigen Tests betreffen das frühere Gerüst. Tests gehören nicht zum Betriebspaket.
