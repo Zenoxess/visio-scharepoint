@@ -188,6 +188,35 @@ class MirrorTests(unittest.TestCase):
                 with self.assertRaises(mirror.MirrorError):
                     self.load_config(data)
 
+    def test_library_display_titles_are_accepted_and_escaped_for_rest(self):
+        # A display title is not a path: ampersands/brackets/apostrophes are valid.
+        titles = (
+            ("Technik & Planung", "Technik%20%26%20Planung"),
+            ("Dokumente [Alt]", "Dokumente%20%5BAlt%5D"),
+            ("Team's Zeichnungen", "Team%27%27s%20Zeichnungen"),
+            ("L" * 255, "L" * 255),
+        )
+        for title, encoded in titles:
+            with self.subTest(title=title):
+                data = self.config_json()
+                data["LibraryName"] = title
+                config = self.load_config(data)
+                self.assertEqual(config.library_name, title)
+                session = Session()
+                sp = mirror.SharePoint(config, session=session)
+                sp.initialize()
+                self.assertEqual(session.calls[0]["url"], SITE + "/_api/web/lists/getbytitle('" + encoded
+                                 + "')?$select=ForceCheckout,RootFolder/ServerRelativeUrl&$expand=RootFolder")
+                self.assertEqual(sp.root, ROOT)
+
+    def test_library_display_titles_reject_excess_length_and_control_characters(self):
+        for title in ("L" * 256, "Dokumente\nIntern", "Dokumente\x00Intern"):
+            with self.subTest(title=title):
+                data = self.config_json()
+                data["LibraryName"] = title
+                with self.assertRaises(mirror.MirrorError):
+                    self.load_config(data)
+
     def test_mutex_identity_uses_only_target_guid(self):
         name = mirror.mutex_name(self.config)
         self.assertEqual(name, "Global\\PPSI_VisioSharePointMirror_" + TARGET_ID.hex.upper())
